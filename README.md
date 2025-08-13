@@ -1,0 +1,37 @@
+# libccar
+
+**libccar** is a self-contained **C99 single-header** library for a simple 2D top-down semi-realistic car simulation.
+It’s lightweight, easy to integrate, and includes an optional Rust demo for visualization.
+
+## Features
+
+* Rear-wheel drive with throttle, brake, and steering
+* Linear lateral tire model
+* Single-header C99 design
+* Optional Rust FFI demo
+* Cross-platform (should be, haven't tried anything except linux)
+
+![screenshot of the demo](https://files.catbox.moe/2cy74h.png "Screenshot of the rust demo")
+
+## Usage (C)
+```c
+#define LIBCCAR_IMPLEMENTATION
+#include "libccar.h"
+```
+Compile:
+```sh
+gcc -std=c99 my_program.c -o my_program
+```
+## Building the rust demo
+
+```sh
+cd libccar
+# Linux: gcc --std=c99 -shared -fPIC -o car_demo/libccar.so build_libccar.c
+# macOS: gcc --std=c99 -dynamiclib -o car_demo/libccar.dylib build_libccar.c
+# Windows: gcc --std=c99 -shared -o car_demo/libccar.dll build_libccar.c
+cd car_demo
+cargo run --release
+```
+
+# Notes
+I haven't tried this on windows or macOS yet so it might not work at all or need some tweaks.
