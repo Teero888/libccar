@@ -98,7 +98,7 @@ lcc_car_t   lcc_car_init(float wheel_radius, float wheel_grip, float mass, float
 void        lcc_car_set_input(lcc_car_t *car, float throttle, float brake, float steering);
 void        lcc_car_update(lcc_car_t *car, float dt);
 const char *lcc_get_version(void);
-#define LIBCCAR_IMPLEMENTATION
+
 #ifdef LIBCCAR_IMPLEMENTATION
 
 static float lcc_clamp(float v, float a, float b) {
