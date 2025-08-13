@@ -38,6 +38,7 @@
   THE SOFTWARE.
 */
 
+#include <stdio.h>
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -46,7 +47,7 @@ extern "C" {
 #include <stddef.h>
 #include <stdint.h>
 
-#define LCC_VERSION "0.3.2"
+#define LCC_VERSION "0.3.3"
 #define LCC_PI      3.14159265358979323846f
 #define LCC_GRAVITY 9.81f
 
@@ -149,36 +150,45 @@ static float lcc_calc_slip_ratio(const lcc_car_t *car, int wi) {
   return lcc_clamp(r, -5.0f, 5.0f);
 }
 
-static float lcc_lateral_force_linear(float cornering_coeff_perN, float alpha, float load, float mu, float lateral_scale) {
-  float K = cornering_coeff_perN * load;
-  float Fy = -K * alpha * lateral_scale;
-  float maxFy = mu * load;
-  if (Fy > maxFy)
-    Fy = maxFy;
-  if (Fy < -maxFy)
-    Fy = -maxFy;
-  return Fy;
+static float lcc_effective_mu(float load, float mu) {
+  const float load_exp = 0.9f;
+  const float ref_load = 3000.0f;
+  return mu * powf(load / ref_load, load_exp - 1.0f);
 }
 
-static float lcc_longitudinal_force_simple(float slip_ratio, float load, float mu) {
-  const float base_long_stiffness = 15.0f * load;
-  float       Fx = base_long_stiffness * slip_ratio;
-  float       maxFx = mu * load;
-  if (Fx > maxFx)
-    Fx = maxFx;
-  if (Fx < -maxFx)
-    Fx = -maxFx;
-  return Fx;
+static void lcc_tire_forces(float slip_angle, float slip_ratio, float load, float mu, float cornering_coeff_perN, float *out_Fx, float *out_Fy, float lateral_scale) {
+  if (load < 1.0f) {
+    *out_Fx = 0.0f;
+    *out_Fy = 0.0f;
+    return;
+  }
+  float mu_eff = lcc_effective_mu(load, mu);
+  float Fx_max = mu_eff * load;
+  float Fy_max = mu_eff * load;
+  float K = cornering_coeff_perN * load;
+  float Fy_lin = -K * slip_angle * lateral_scale;
+  float base_long_stiffness = 15.0f * load;
+  float Fx_lin = base_long_stiffness * slip_ratio;
+  float scale = 1.0f;
+  float norm = (Fx_lin / Fx_max) * (Fx_lin / Fx_max) + (Fy_lin / Fy_max) * (Fy_lin / Fy_max);
+  if (norm > 1.0f) {
+    scale = 1.0f / sqrtf(norm);
+  }
+
+  *out_Fx = Fx_lin * scale;
+  *out_Fy = Fy_lin * scale;
 }
 
 static void lcc_compute_loads(lcc_car_t *car, const float accel_world[2]) {
+  float a_local[2] = {accel_world[0], accel_world[1]};
+  lcc_rotate_vec(a_local, -car->angle);
   float total_load = car->mass * LCC_GRAVITY;
   float front_axle_static = total_load * (1.0f - car->cg_position);
   float rear_axle_static = total_load * car->cg_position;
   float front_per_wheel = front_axle_static * 0.5f;
   float rear_per_wheel = rear_axle_static * 0.5f;
-  float long_transfer = car->mass * accel_world[0] * car->cg_height / car->wheelbase;
-  float lat_transfer = car->mass * accel_world[1] * car->cg_height / car->track_width;
+  float long_transfer = car->mass * a_local[0] * car->cg_height / car->wheelbase;
+  float lat_transfer = car->mass * a_local[1] * car->cg_height / car->track_width;
   car->wheels[0].load = front_per_wheel - 0.5f * long_transfer - 0.5f * lat_transfer;
   car->wheels[1].load = front_per_wheel - 0.5f * long_transfer + 0.5f * lat_transfer;
   car->wheels[2].load = rear_per_wheel + 0.5f * long_transfer - 0.5f * lat_transfer;
@@ -230,7 +240,7 @@ lcc_car_t lcc_car_init(float wheel_radius, float wheel_grip, float mass, float w
   car.frontal_area = 1.8f;
   car.max_steer_angle = 0.7f;
   car.engine_power = engine_power;
-  car.brake_force = 20000.0f;
+  car.brake_force = 60000.0f;
   car.wheel_mass = 10.0f;
   car.cornering_stiffness = 8.0f;
   car.lateral_friction_scale = 1.0f;
@@ -253,12 +263,12 @@ void lcc_car_update(lcc_car_t *car, float dt) {
   if (dt <= 0.0f)
     return;
   const float low_speed_threshold = 0.5f;
-  const float wheel_omega_snap = 0.5f;
+  const float wheel_omega_snap = 1.5f;
   const float max_wheel_alpha = 5000.0f;
   const float wheel_inertia_bias = 5.0f;
-  const float angular_damping = 0.995f;
+  const float angular_damping = 0.999f;
   const float linear_damping = 0.999f;
-  const int   max_substeps = 6;
+  const int   max_substeps = 1;
   const float target_substep_dt = 0.02f;
   int         steps = (int)ceilf(dt / target_substep_dt);
   if (steps < 1)
@@ -290,8 +300,9 @@ void lcc_car_update(lcc_car_t *car, float dt) {
         w->slip_angle = 0.0f;
         w->slip_ratio = 0.0f;
       }
-      float Fy = lcc_lateral_force_linear(car->cornering_stiffness, w->slip_angle, w->load, w->grip, car->lateral_friction_scale);
-      float Fx_tire = lcc_longitudinal_force_simple(w->slip_ratio, w->load, w->grip);
+
+      float Fx_tire, Fy;
+      lcc_tire_forces(w->slip_angle, w->slip_ratio, w->load, w->grip, car->cornering_stiffness, &Fx_tire, &Fy, car->lateral_friction_scale);
 
       if (vehicle_speed < low_speed_threshold) {
         float fac = CLAMP(vehicle_speed / low_speed_threshold, 0.0f, 1.0f);
@@ -325,24 +336,19 @@ void lcc_car_update(lcc_car_t *car, float dt) {
       float engine_torque = engine_force_on_wheel * w->radius;
 
       float reaction_torque = Fx_tire * w->radius;
-      float raw_brake_torque = car->brake * car->brake_force * 0.25f * w->radius;
-      float brake_torque = 0.0f;
-
-      if (car->brake > 0.0f) {
-        if (w->angular_velocity > 0.0f)
-          brake_torque = raw_brake_torque;
-        else if (w->angular_velocity < 0.0f)
-          brake_torque = -raw_brake_torque;
-      }
-      float net_torque = engine_torque - reaction_torque - brake_torque;
+      float net_torque = engine_torque - reaction_torque;
       float alpha = net_torque / fmaxf(Iw, 1e-6f);
       alpha = CLAMP(alpha, -max_wheel_alpha, max_wheel_alpha);
       w->angular_velocity += alpha * subdt;
-      float       v_long = wheel_vx * cosf(wheel_world_angle) + wheel_vy * sinf(wheel_world_angle);
-      float       wheel_ground_speed = v_long / w->radius;
-      const float coupling = 25.0f;
-      float       target_omega = wheel_ground_speed;
-      float       lerp_t = CLAMP(subdt * coupling, 0.0f, 1.0f);
+
+      if (i < 2 && car->brake > 0.0f)
+        w->angular_velocity *= 10000.f / (car->brake * car->brake_force * w->radius);
+
+      float v_long = wheel_vx * cosf(wheel_world_angle) + wheel_vy * sinf(wheel_world_angle);
+      float wheel_ground_speed = v_long / w->radius;
+      float coupling = 1.0f;
+      float target_omega = wheel_ground_speed;
+      float lerp_t = CLAMP(subdt * coupling, 0.0f, 1.0f);
       w->angular_velocity = w->angular_velocity * (1.0f - lerp_t) + target_omega * lerp_t;
       w->angular_velocity *= 0.998f;
       if (fabsf(w->angular_velocity) < wheel_omega_snap && car->brake > 0.1f)
