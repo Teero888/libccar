@@ -6,6 +6,11 @@ use std::os::raw::{c_char, c_float, c_int};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+const STEERING_RATE: f32 = 4.0;
+const STEERING_CENTERING_RATE: f32 = 5.0;
+const THROTTLE_RATE: f32 = 3.0;
+const BRAKE_RATE: f32 = 5.0;
+
 const LCC_DRIVE_RWD: c_int = 0;
 const LCC_DRIVE_FWD: c_int = 1;
 const LCC_DRIVE_AWD: c_int = 2;
@@ -27,10 +32,8 @@ struct LccWheel {
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 struct LccCar {
-    // Wheels
     wheels: [LccWheel; 4],
 
-    // State
     position: [c_float; 2],
     velocity: [c_float; 2],
     prev_velocity: [c_float; 2],
@@ -40,7 +43,6 @@ struct LccCar {
     angle: c_float,
     angular_velocity: c_float,
 
-    // Vehicle properties
     mass: c_float,
     inertia: c_float,
     wheelbase: c_float,
@@ -48,44 +50,44 @@ struct LccCar {
     cg_height: c_float,
     cg_position: c_float,
 
-    // Aero
     drag_coeff: c_float,
     frontal_area: c_float,
     air_density: c_float,
     downforce_coeff: c_float,
     downforce_area: c_float,
 
-    // Controls and limits
     max_steer_angle: c_float,
 
-    // Powertrain
     engine_power: c_float,
-    drive_type: c_int, // 0=RWD,1=FWD,2=AWD
+    drive_type: c_int,
     num_gears: c_int,
     gear: c_int,
     gear_ratios: [c_float; LCC_MAX_GEARS],
     final_drive: c_float,
     transmission_efficiency: c_float,
 
-    // Engine curve
     idle_rpm: c_float,
     peak_rpm: c_float,
     redline_rpm: c_float,
 
-    // Brakes
     brake_bias: c_float,
     brake_torque_max: c_float,
-    brake_force: c_float, // legacy field; still present
 
-    // Wheel/tire
     wheel_mass: c_float,
-    cornering_stiffness: c_float,
     lateral_friction_scale: c_float,
 
-    // Tunables
     long_transfer_factor: c_float,
     lat_transfer_factor: c_float,
     wheel_inertia_bias: c_float,
+
+    engine_omega: c_float,
+    flywheel_inertia: c_float,
+    engine_friction_coeff: c_float,
+    clutch: c_float,
+    clutch_engagement_rate: c_float,
+    clutch_max_torque: c_float,
+    clutch_stiffness: c_float,
+    auto_clutch: c_int,
 }
 
 impl Default for LccCar {
@@ -95,18 +97,30 @@ impl Default for LccCar {
 }
 
 struct InputState {
-    throttle: f32,
-    brake: f32,
-    steering: f32,
+    target_throttle: f32,
+    target_brake: f32,
+    target_steering: f32,
+
+    current_throttle: f32,
+    current_brake: f32,
+    current_steering: f32,
+
+    clutch_inc: bool,
+    clutch_dec: bool,
     keys_pressed: HashMap<egui::Key, bool>,
 }
 
 impl Default for InputState {
     fn default() -> Self {
         Self {
-            throttle: 0.0,
-            brake: 0.0,
-            steering: 0.0,
+            target_throttle: 0.0,
+            target_brake: 0.0,
+            target_steering: 0.0,
+            current_throttle: 0.0,
+            current_brake: 0.0,
+            current_steering: 0.0,
+            clutch_inc: false,
+            clutch_dec: false,
             keys_pressed: HashMap::new(),
         }
     }
@@ -118,7 +132,6 @@ enum CameraMode {
     Follow,
 }
 
-// Visualization-only tire model helpers (match C constants)
 fn effective_mu(load: f32, mu_base: f32) -> f32 {
     let ref_load = 3000.0_f32;
     let fz = load.max(1.0);
@@ -133,8 +146,8 @@ struct TireForceEst {
     fy_local: f32,
     fx_world: f32,
     fy_world: f32,
-    cap: f32,  // mu_eff * Fz
-    util: f32, // p-norm utilization ~[0..1+]
+    cap: f32,
+    util: f32,
     mu_eff: f32,
 }
 
@@ -144,6 +157,11 @@ struct CarSimApp {
     car: LccCar,
     input: InputState,
     version: String,
+    has_clutch_api: bool,
+
+    auto_clutch_enabled: bool,
+    manual_clutch: f32,
+
     last_update: Instant,
     error: Option<String>,
     paused: bool,
@@ -158,17 +176,14 @@ struct CarSimApp {
     show_forces: bool,
     camera_mode: CameraMode,
 
-    // Visualization toggles
     show_tire_forces: bool,
     show_traction_circles: bool,
     show_yaw_moment: bool,
     show_accel: bool,
 
-    // Acceleration tracking
     last_dt: f32,
     accel_world: [f32; 2],
 
-    // Init params passed to lcc_car_init:
     wheel_radius: f32,
     wheel_grip: f32,
     mass: f32,
@@ -193,6 +208,9 @@ impl CarSimApp {
             car: LccCar::default(),
             input: InputState::default(),
             version: "Unknown".to_string(),
+            has_clutch_api: false,
+            auto_clutch_enabled: true,
+            manual_clutch: 1.0,
             last_update: Instant::now(),
             last_reload: Instant::now(),
             reload_interval: Duration::from_secs(1),
@@ -207,7 +225,6 @@ impl CarSimApp {
             last_lib_modified: None,
             camera_mode: CameraMode::Follow,
 
-            // New viz toggles and accel
             show_tire_forces: false,
             show_traction_circles: false,
             show_yaw_moment: false,
@@ -215,7 +232,6 @@ impl CarSimApp {
             last_dt: 1.0 / 60.0,
             accel_world: [0.0, 0.0],
 
-            // Init params
             wheel_radius: 0.35,
             wheel_grip: 2.5,
             mass: 1200.0,
@@ -251,7 +267,24 @@ impl CarSimApp {
             Ok(lib) => {
                 self.error = None;
                 let was_initialized = self.car.mass > 0.0;
+                self.has_clutch_api = false;
                 self.lib = Some(lib);
+
+                if let Some(lib) = &self.lib {
+                    let has_enable = unsafe {
+                        lib.get::<unsafe extern "C" fn(*mut LccCar, c_int)>(
+                            b"lcc_car_enable_auto_clutch\0",
+                        )
+                    }
+                    .is_ok();
+                    let has_set = unsafe {
+                        lib.get::<unsafe extern "C" fn(*mut LccCar, c_float)>(
+                            b"lcc_car_set_clutch\0",
+                        )
+                    }
+                    .is_ok();
+                    self.has_clutch_api = has_enable && has_set;
+                }
 
                 if !was_initialized {
                     self.reset_car_to_defaults();
@@ -287,6 +320,9 @@ impl CarSimApp {
                         self.engine_power,
                     )
                 };
+
+                self.auto_clutch_enabled = self.car.auto_clutch != 0;
+                self.manual_clutch = self.car.clutch;
             }
         }
     }
@@ -330,24 +366,56 @@ impl CarSimApp {
         } else {
             0.0
         };
-        self.input.throttle = ((pos_throttle - neg_throttle) as f32).clamp(-1.0, 1.0);
+        self.input.target_throttle = ((pos_throttle - neg_throttle) as f32).clamp(-1.0, 1.0);
 
-        // Wheel brakes
-        self.input.brake = if is_pressed(&egui::Key::ArrowDown, &egui::Key::S) {
+        self.input.target_brake = if is_pressed(&egui::Key::ArrowDown, &egui::Key::S) {
             1.0
         } else {
             0.0
         };
 
-        // Steering
-        let mut steering = 0.0;
+        let mut steering_target = 0.0;
         if is_pressed(&egui::Key::ArrowLeft, &egui::Key::A) {
-            steering -= 1.0;
+            steering_target -= 1.0;
         }
         if is_pressed(&egui::Key::ArrowRight, &egui::Key::D) {
-            steering += 1.0;
+            steering_target += 1.0;
         }
-        self.input.steering = steering;
+        self.input.target_steering = steering_target;
+
+        self.input.clutch_dec = self
+            .input
+            .keys_pressed
+            .get(&egui::Key::Q)
+            .copied()
+            .unwrap_or(false);
+        self.input.clutch_inc = self
+            .input
+            .keys_pressed
+            .get(&egui::Key::E)
+            .copied()
+            .unwrap_or(false);
+    }
+
+    fn smooth_inputs(&mut self, dt: f32) {
+        let steer_rate = if self.input.target_steering.abs() < 0.01
+            && self.input.current_steering.abs() > 0.01
+        {
+            STEERING_CENTERING_RATE
+        } else {
+            STEERING_RATE
+        };
+        let delta_steer = self.input.target_steering - self.input.current_steering;
+        self.input.current_steering += delta_steer * steer_rate * dt;
+        self.input.current_steering = self.input.current_steering.clamp(-1.0, 1.0);
+
+        let delta_throttle = self.input.target_throttle - self.input.current_throttle;
+        self.input.current_throttle += delta_throttle * THROTTLE_RATE * dt;
+        self.input.current_throttle = self.input.current_throttle.clamp(-1.0, 1.0);
+
+        let delta_brake = self.input.target_brake - self.input.current_brake;
+        self.input.current_brake += delta_brake * BRAKE_RATE * dt;
+        self.input.current_brake = self.input.current_brake.clamp(0.0, 1.0);
     }
 
     fn apply_realtime_param_edits(&mut self) {
@@ -365,10 +433,30 @@ impl CarSimApp {
         if self.car.air_density <= 0.0 {
             self.car.air_density = 1.225;
         }
+
+        self.car.flywheel_inertia = self.car.flywheel_inertia.max(0.01);
+        self.car.engine_friction_coeff = self.car.engine_friction_coeff.max(0.0);
+        self.car.clutch_max_torque = self.car.clutch_max_torque.max(0.0);
+        self.car.clutch_stiffness = self.car.clutch_stiffness.max(0.0);
+        self.car.clutch_engagement_rate = self.car.clutch_engagement_rate.clamp(0.1, 100.0);
     }
 
     fn update_car_physics(&mut self, dt: f32) {
         self.apply_realtime_param_edits();
+
+        if !self.auto_clutch_enabled {
+            let rate = self.car.clutch_engagement_rate as f32;
+            let mut target = self.manual_clutch;
+            if self.input.clutch_dec {
+                target = 0.0;
+            } else if self.input.clutch_inc {
+                target = 1.0;
+            }
+
+            let step = (rate * dt).clamp(0.0, 1.0);
+            self.manual_clutch = self.manual_clutch + (target - self.manual_clutch) * step;
+            self.manual_clutch = self.manual_clutch.clamp(0.0, 1.0);
+        }
 
         if let Some(lib) = &self.lib {
             if let Ok(set_input) = unsafe {
@@ -379,19 +467,45 @@ impl CarSimApp {
                 unsafe {
                     set_input(
                         &mut self.car,
-                        self.input.throttle,
-                        self.input.brake,
-                        self.input.steering,
+                        self.input.current_throttle,
+                        self.input.current_brake,
+                        self.input.current_steering,
                     );
+                }
+            }
+
+            if self.has_clutch_api {
+                if let Ok(enable_auto) = unsafe {
+                    lib.get::<unsafe extern "C" fn(*mut LccCar, c_int)>(
+                        b"lcc_car_enable_auto_clutch\0",
+                    )
+                } {
+                    unsafe {
+                        enable_auto(&mut self.car, if self.auto_clutch_enabled { 1 } else { 0 });
+                    }
+                }
+                if !self.auto_clutch_enabled {
+                    if let Ok(set_clutch) = unsafe {
+                        lib.get::<unsafe extern "C" fn(*mut LccCar, c_float)>(
+                            b"lcc_car_set_clutch\0",
+                        )
+                    } {
+                        unsafe {
+                            set_clutch(&mut self.car, self.manual_clutch);
+                        }
+                    }
+                }
+            } else {
+                self.car.auto_clutch = if self.auto_clutch_enabled { 1 } else { 0 };
+                if !self.auto_clutch_enabled {
+                    self.car.clutch = self.manual_clutch;
                 }
             }
 
             if let Ok(update) = unsafe {
                 lib.get::<unsafe extern "C" fn(*mut LccCar, c_float)>(b"lcc_car_update\0")
             } {
-                unsafe {
-                    update(&mut self.car, dt);
-                }
+                unsafe { update(&mut self.car, dt) };
             }
         }
 
@@ -535,7 +649,7 @@ impl CarSimApp {
         match self.car.drive_type {
             x if x == LCC_DRIVE_RWD => idx >= 2,
             x if x == LCC_DRIVE_FWD => idx < 2,
-            _ => true, // AWD
+            _ => true,
         }
     }
 
@@ -548,7 +662,6 @@ impl CarSimApp {
         let mu_eff = effective_mu(load, w.grip);
         let fz = load;
 
-        // Magic formula shape params (match C)
         let (c_lat, d_lat, e_lat) = (1.35_f32, 1.0_f32, -1.3_f32);
         let (c_long, d_long, e_long) = (1.65_f32, 1.0_f32, -0.5_f32);
         let fz_ref = 4000.0_f32;
@@ -579,7 +692,6 @@ impl CarSimApp {
             * fz
             * (c_long * (t_long - e_long * (t_long - t_long.atan())).atan()).sin();
 
-        // Combined slip via p-norm ellipse
         let cap = mu_eff * fz;
         let nx = fx0 / cap.max(1.0);
         let ny = fy0 / cap.max(1.0);
@@ -589,7 +701,6 @@ impl CarSimApp {
         let fx = fx0 * scale;
         let fy = fy0 * scale;
 
-        // Rotate to world
         let wheel_world_angle = self.car.angle + w.steer_angle;
         let c = wheel_world_angle.cos();
         let s = wheel_world_angle.sin();
@@ -635,13 +746,12 @@ impl CarSimApp {
 
         let mut yaw_mz_est = 0.0_f32;
 
-        // wheels
         for (i, wheel) in self.car.wheels.iter().enumerate() {
             let wheel_local_pos = egui::vec2(wheel.position[0], wheel.position[1]);
             let rotated_offset = rot * wheel_local_pos;
             let wheel_screen_pos = car_screen_pos + rotated_offset * self.zoom;
 
-            let static_wheel_load = (self.car.mass * 9.81 / 4.0) as f32;
+            let static_wheel_load = (self.car.mass * 9.81 / 3.0) as f32;
             let load_factor = (wheel.load / static_wheel_load as c_float).clamp(0.0, 2.0) as f32;
             let wheel_color: egui::Color32 = egui::lerp(
                 egui::Rgba::from_rgb(0.0, 1.0, 0.0)..=egui::Rgba::from_rgb(1.0, 0.0, 0.0),
@@ -674,9 +784,8 @@ impl CarSimApp {
                 egui::Stroke::new(2.0, egui::Color32::from_rgb(20, 20, 20)),
             );
 
-            // slip angle indicator (perpendicular arrow)
             let slip = wheel.slip_angle.clamp(-0.7, 0.7);
-            let perp = egui::vec2(-(total_steer_angle).sin(), -(total_steer_angle).cos()); // screen coords
+            let perp = egui::vec2(-(total_steer_angle).sin(), -(total_steer_angle).cos());
             let slip_len = wheel_radius_screen * 1.2 * slip.abs() as f32;
             let slip_end = wheel_screen_pos + perp * slip_len * slip.signum() as f32;
             painter.arrow(
@@ -685,9 +794,7 @@ impl CarSimApp {
                 egui::Stroke::new(2.0, egui::Color32::RED),
             );
 
-            // estimated tire forces and traction circles (visualization-only)
             if let Some(est) = self.estimate_wheel_forces(i) {
-                // world-space wheel offset from CG
                 let wp_world = egui::Vec2::new(
                     wheel.position[0] * self.car.angle.cos()
                         - wheel.position[1] * self.car.angle.sin(),
@@ -697,7 +804,6 @@ impl CarSimApp {
 
                 yaw_mz_est += wp_world.x * est.fy_world - wp_world.y * est.fx_world;
 
-                // in screen space
                 let dir_long = egui::vec2(total_steer_angle.cos(), -total_steer_angle.sin());
                 let dir_lat = egui::vec2(-total_steer_angle.sin(), -total_steer_angle.cos());
 
@@ -721,16 +827,15 @@ impl CarSimApp {
                     );
                 }
 
-                // Traction circle (normalized friction space)
                 if self.show_traction_circles {
                     let r = wheel_radius_screen * 1.15;
-                    // circle
+
                     painter.circle_stroke(
                         wheel_screen_pos,
                         r,
                         egui::Stroke::new(1.0, egui::Color32::from_gray(40)),
                     );
-                    // axes
+
                     painter.line_segment(
                         [
                             wheel_screen_pos - dir_long * r,
@@ -745,7 +850,7 @@ impl CarSimApp {
                         ],
                         egui::Stroke::new(1.0, egui::Color32::from_gray(60)),
                     );
-                    // current point
+
                     let cap = est.cap.max(1.0);
                     let nx = est.fx_local / cap;
                     let ny = est.fy_local / cap;
@@ -762,7 +867,6 @@ impl CarSimApp {
             }
         }
 
-        // velocity vector
         if self.show_forces {
             let vel_vec = egui::vec2(self.car.velocity[0], self.car.velocity[1]) * 0.25 * self.zoom;
             painter.arrow(
@@ -771,7 +875,6 @@ impl CarSimApp {
                 egui::Stroke::new(2.0, egui::Color32::CYAN),
             );
 
-            // downforce arrow
             let speed = (self.car.velocity[0].hypot(self.car.velocity[1])) as f32;
             let df = 0.5
                 * self.car.air_density as f32
@@ -789,7 +892,6 @@ impl CarSimApp {
             }
         }
 
-        // acceleration vector (world -> screen)
         if self.show_accel {
             let a = egui::vec2(self.accel_world[0], self.accel_world[1]) * 0.2 * self.zoom;
             if a.length_sq() > 1e-6 {
@@ -805,7 +907,7 @@ impl CarSimApp {
             let scale_ref = (self.car.mass as f32 * 9.81 * self.car.wheelbase) as f32;
             let t = (yaw_mz_est / scale_ref).clamp(-1.5, 1.5);
             if t.abs() > 1e-3 {
-                let dir_sign = if t >= 0.0 { 1.0 } else { -1.0 }; // CCW positive
+                let dir_sign = if t >= 0.0 { 1.0 } else { -1.0 };
                 let len = (t.abs()) * 60.0;
                 let tang_world = egui::vec2(-self.car.angle.sin(), self.car.angle.cos());
                 let tang_screen = egui::vec2(tang_world.x, -tang_world.y) * dir_sign * len;
@@ -832,21 +934,7 @@ impl CarSimApp {
     }
 
     fn engine_rpm(&self) -> f32 {
-        // Average |omega| of driven wheels
-        let mut sum = 0.0f32;
-        let mut count = 0.0f32;
-        for (i, w) in self.car.wheels.iter().enumerate() {
-            if self.is_wheel_driven(i) {
-                sum += w.angular_velocity.abs();
-                count += 1.0;
-            }
-        }
-        if count == 0.0 {
-            return self.car.idle_rpm.max(800.0);
-        }
-        let avg_omega = sum / count;
-        let ratio = self.drivetrain_ratio().max(0.01);
-        avg_omega * (60.0 / (2.0 * std::f32::consts::PI)) * ratio
+        (self.car.engine_omega as f32) * (60.0 / (2.0 * std::f32::consts::PI))
     }
 
     fn draw_hud_overlay(&self, painter: &egui::Painter, rect: egui::Rect) {
@@ -877,8 +965,14 @@ impl CarSimApp {
             * speed;
         let accel = (self.accel_world[0].hypot(self.accel_world[1])) as f32;
 
+        let clutch_val = if self.auto_clutch_enabled {
+            self.car.clutch as f32
+        } else {
+            self.manual_clutch
+        };
+
         let text = format!(
-            "v={:5.1} km/h | Gear {:>1}/{} | Ratio {:.2} | RPM {:>5.0} | {} | Drag {:>6.0} N | DF {:>6.0} N | acc={:>4.1} m/s²",
+            "v={:5.1} km/h | Gear {:>1}/{} | Ratio {:.2} | RPM {:>5.0} | {} | Drag {:>6.0} N | DF {:>6.0} N | acc={:>4.1} m/s² | Clutch {} {:.2}",
             speed_kmh,
             gear_idx + 1,
             ng,
@@ -887,7 +981,9 @@ impl CarSimApp {
             drive_str,
             drag,
             downforce,
-            accel
+            accel,
+            if self.auto_clutch_enabled { "AUTO" } else { "MAN" },
+            clutch_val
         );
 
         let font = egui::FontId::monospace(16.0);
@@ -899,7 +995,6 @@ impl CarSimApp {
             egui::Color32::WHITE,
         );
 
-        // RPM bar
         let bar_w = 240.0;
         let bar_h = 10.0;
         let x = rect.left_top().x + 10.0;
@@ -935,6 +1030,9 @@ impl CarSimApp {
             ui.label("W/Up: Throttle, Z/X: Engine Brake (negative throttle)");
             ui.label("S/Down: Wheel Brakes");
             ui.label("A/Left, D/Right: Steering");
+            ui.label("Q: Disengage clutch (hold)");
+            ui.label("E: Engage clutch (hold)");
+            ui.label("C: Toggle Auto-Clutch");
             ui.label("Mouse Drag: Pan View (in Free mode)");
             ui.label("Mouse Wheel: Zoom View");
             ui.label("Spacebar: Pause/Resume");
@@ -1015,7 +1113,7 @@ impl CarSimApp {
                     self.car.angular_velocity
                 ));
                 ui.separator();
-                ui.label("Inputs:");
+                ui.label("Inputs (applied to car):");
                 ui.label(format!("  Throttle: {:.2}", self.car.throttle));
                 ui.label(format!("  Brake: {:.2}", self.car.brake));
                 ui.label(format!("  Steering: {:.2}", self.car.steering));
@@ -1026,6 +1124,19 @@ impl CarSimApp {
                     self.car.num_gears
                 ));
                 ui.label(format!("Engine RPM: {:.0}", self.engine_rpm()));
+                ui.label(format!(
+                    "Clutch: {} {:.2}",
+                    if self.auto_clutch_enabled {
+                        "AUTO"
+                    } else {
+                        "MAN"
+                    },
+                    if self.auto_clutch_enabled {
+                        self.car.clutch as f32
+                    } else {
+                        self.manual_clutch
+                    }
+                ));
             });
 
             ui.separator();
@@ -1094,14 +1205,42 @@ impl CarSimApp {
                     (self.car.gear + 1).max(1),
                     self.drivetrain_ratio()
                 ));
-                ui.label(format!("Est. RPM: {:.0}", self.engine_rpm()));
+                ui.label(format!("Engine RPM: {:.0}", self.engine_rpm()));
+
                 ui.separator();
-                ui.add(egui::Slider::new(&mut self.car.idle_rpm, 500.0..=1500.0).text("idle rpm"));
-                ui.add(egui::Slider::new(&mut self.car.peak_rpm, 2000.0..=6000.0).text("peak rpm"));
+                ui.checkbox(&mut self.auto_clutch_enabled, "Auto clutch (C)");
+                if !self.auto_clutch_enabled {
+                    ui.add(
+                        egui::Slider::new(&mut self.manual_clutch, 0.0..=1.0)
+                            .text("manual clutch (0=disengaged, 1=engaged) [Q/E]"),
+                    );
+                }
                 ui.add(
-                    egui::Slider::new(&mut self.car.redline_rpm, 4000.0..=9000.0)
-                        .text("redline rpm"),
+                    egui::Slider::new(&mut self.car.flywheel_inertia, 0.05..=1.0)
+                        .text("flywheel inertia (kg·m²)"),
                 );
+                ui.add(
+                    egui::Slider::new(&mut self.car.engine_friction_coeff, 0.0..=1.0)
+                        .text("engine friction coeff"),
+                );
+                ui.add(
+                    egui::Slider::new(&mut self.car.clutch_max_torque, 100.0..=3000.0)
+                        .text("clutch max torque (Nm)"),
+                );
+                ui.add(
+                    egui::Slider::new(&mut self.car.clutch_stiffness, 0.0..=200.0)
+                        .text("clutch stiffness (Nm/(rad/s))"),
+                );
+                ui.add(
+                    egui::Slider::new(&mut self.car.clutch_engagement_rate, 1.0..=30.0)
+                        .text("clutch engagement rate (1/s)"),
+                );
+                if !self.has_clutch_api {
+                    ui.colored_label(
+                        egui::Color32::YELLOW,
+                        "Clutch API not found in library: falling back to struct fields",
+                    );
+                }
             });
 
             ui.separator();
@@ -1217,6 +1356,9 @@ impl eframe::App for CarSimApp {
                 self.reset_car_to_defaults();
                 self.trail_points.clear();
             }
+            if i.key_pressed(egui::Key::C) {
+                self.auto_clutch_enabled = !self.auto_clutch_enabled;
+            }
         });
 
         if self.auto_reload && self.last_reload.elapsed() >= self.reload_interval {
@@ -1225,21 +1367,20 @@ impl eframe::App for CarSimApp {
         }
 
         let now = Instant::now();
-        // Clamp dt to sane bounds for numerical stability and consistent viz
+
         let dt = (now - self.last_update)
             .as_secs_f32()
             .clamp(1.0 / 300.0, 1.0 / 30.0);
 
         self.update_input(ctx);
+        self.smooth_inputs(dt);
 
-        // Capture velocity before physics step to estimate acceleration for viz
         let v0 = [self.car.velocity[0], self.car.velocity[1]];
 
         if !self.paused && self.lib.is_some() {
             self.update_car_physics(dt);
         }
 
-        // Acceleration estimate
         let v1 = [self.car.velocity[0], self.car.velocity[1]];
         if dt > 0.0 {
             self.accel_world = [(v1[0] - v0[0]) / dt, (v1[1] - v0[1]) / dt];
@@ -1256,7 +1397,7 @@ impl eframe::App for CarSimApp {
 
         egui::SidePanel::right("side_panel")
             .resizable(true)
-            .default_width(340.0)
+            .default_width(360.0)
             .show(ctx, |ui| {
                 self.draw_side_panel(ui);
             });

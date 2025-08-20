@@ -26,7 +26,7 @@
   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
   THE SOFTWARE.
 */
 
@@ -37,7 +37,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define LCC_VERSION "0.3.4"
+#define LCC_VERSION "0.3.5"
 #define LCC_PI      3.14159265358979323846f
 #define LCC_GRAVITY 9.81f
 
@@ -53,7 +53,7 @@ typedef struct {
 } lcc_wheel_t;
 
 typedef struct {
-  lcc_wheel_t wheels[4];               /* **the wheels** (don't really need them in my opinion) */
+  lcc_wheel_t wheels[4];               /* **the wheels** */
   float       position[2];             /* m, world position */
   float       velocity[2];             /* m/s, world velocity */
   float       prev_velocity[2];        /* m/s, previous velocity for acceleration */
@@ -91,6 +91,20 @@ typedef struct {
   float       long_transfer_factor;    /* dimensionless, suspension compliance for longitudinal transfer */
   float       lat_transfer_factor;     /* dimensionless, suspension compliance for lateral transfer */
   float       wheel_inertia_bias;      /* dimensionless, multiplier on wheel inertia */
+
+  float engine_omega;           /* rad/s, engine speed state */
+  float flywheel_inertia;       /* kg*m^2, engine/flywheel inertia */
+  float engine_friction_coeff;  /* N*m*s/rad, viscous engine friction */
+  float clutch;                 /* 0..1, engagement fraction */
+  float clutch_engagement_rate; /* 1/s, how fast auto-clutch moves toward target */
+  float clutch_max_torque;      /* Nm, capacity when fully engaged */
+  float clutch_stiffness;       /* N*m*s/rad, resists slip (viscous-like) */
+  int   auto_clutch;            /* 0/1, automatic clutch enabled */
+
+  float idle_integral;   /* Nm, internal PI integrator */
+  float idle_kp;         /* Nm per (rad/s) */
+  float idle_ki;         /* Nm per (rad/s*s) */
+  float idle_torque_max; /* Nm, clamp */
 } lcc_car_t;
 
 typedef struct {
@@ -101,13 +115,22 @@ typedef struct {
 
 lcc_car_t   lcc_car_init(float wheel_radius, float wheel_grip, float mass, float wheelbase, float track_width, float engine_power);
 void        lcc_car_set_input(lcc_car_t *car, float throttle, float brake, float steering);
+void        lcc_car_set_clutch(lcc_car_t *car, float clutch);
+void        lcc_car_enable_auto_clutch(lcc_car_t *car, int enabled);
 void        lcc_car_update(lcc_car_t *car, float dt);
 const char *lcc_get_version(void);
 
-#define LIBCCAR_IMPLEMENTATION
 #ifdef LIBCCAR_IMPLEMENTATION
 
 static float lcc_clamp(float v, float a, float b) {
+  if (v < a)
+    return a;
+  if (v > b)
+    return b;
+  return v;
+}
+
+static int lcc_clampi(int v, int a, int b) {
   if (v < a)
     return a;
   if (v > b)
@@ -129,6 +152,13 @@ static void lcc_rotate_vec(float v[2], float ang) {
   v[1] = y;
 }
 
+static float lcc_move_towards(float current, float target, float max_delta) {
+  if (current < target)
+    return fminf(current + max_delta, target);
+  else
+    return fmaxf(current - max_delta, target);
+}
+
 static float lcc_calc_slip_angle(const lcc_car_t *car, int wi) {
   const lcc_wheel_t *w = &car->wheels[wi];
   float              wp[2] = {w->position[0], w->position[1]};
@@ -143,23 +173,20 @@ static float lcc_calc_slip_angle(const lcc_car_t *car, int wi) {
   return atan2f(lateral, longitudinal);
 }
 
+/* Slip ratio using standard definition with a speed floor */
 static float lcc_calc_slip_ratio(const lcc_car_t *car, int wi) {
   const lcc_wheel_t *w = &car->wheels[wi];
   float              wp[2] = {w->position[0], w->position[1]};
   lcc_rotate_vec(wp, car->angle);
-  float wheel_vx = car->velocity[0] - car->angular_velocity * wp[1];
-  float wheel_vy = car->velocity[1] + car->angular_velocity * wp[0];
-  float wheel_world_angle = car->angle + w->steer_angle;
-  float v_long = wheel_vx * cosf(wheel_world_angle) + wheel_vy * sinf(wheel_world_angle);
-  float omega_r = w->angular_velocity * w->radius;
-  float slip_ratio = 0.0f;
-  if (fabsf(v_long) < 0.1f && fabsf(omega_r) < 0.1f)
-    slip_ratio = 0.0f;
-  else if (fabsf(omega_r) > fabsf(v_long))
-    slip_ratio = (omega_r - v_long) / fmaxf(fabsf(omega_r), 0.1f);
-  else
-    slip_ratio = (omega_r - v_long) / fmaxf(fabsf(v_long), 0.1f);
-  return lcc_clamp(slip_ratio, -1.0f, 1.0f);
+  float       wheel_vx = car->velocity[0] - car->angular_velocity * wp[1];
+  float       wheel_vy = car->velocity[1] + car->angular_velocity * wp[0];
+  float       wheel_world_angle = car->angle + w->steer_angle;
+  float       v_long = wheel_vx * cosf(wheel_world_angle) + wheel_vy * sinf(wheel_world_angle);
+  float       omega_r = w->angular_velocity * w->radius;
+  const float eps = 0.5f; /* m/s */
+  float       denom = fmaxf(fabsf(v_long), eps);
+  float       kappa = (omega_r - v_long) / denom;
+  return lcc_clamp(kappa, -1.5f, 1.5f);
 }
 
 static float lcc_effective_mu(float load, float mu_base) {
@@ -342,6 +369,7 @@ lcc_car_t lcc_car_init(float wheel_radius, float wheel_grip, float mass, float w
   car.engine_power = engine_power;
   car.drive_type = 0;
   car.num_gears = 6;
+  car.gear = 0;
   car.gear_ratios[0] = 4.11f;
   car.gear_ratios[1] = 2.32f;
   car.gear_ratios[2] = 1.54f;
@@ -360,6 +388,21 @@ lcc_car_t lcc_car_init(float wheel_radius, float wheel_grip, float mass, float w
   car.long_transfer_factor = 1.0f;
   car.lat_transfer_factor = 1.0f;
   car.wheel_inertia_bias = 1.0f;
+
+  car.engine_omega = car.idle_rpm * (2.0f * LCC_PI / 60.0f);
+  car.flywheel_inertia = 0.40f;
+  car.engine_friction_coeff = 0.12f;
+  car.clutch = 1.0f;
+  car.clutch_engagement_rate = 4.0f;
+  car.clutch_max_torque = 700.0f;
+  car.clutch_stiffness = 12.0f;
+  car.auto_clutch = 1;
+
+  car.idle_kp = 0.20f;
+  car.idle_ki = 0.60f;
+  car.idle_torque_max = 80.0f;
+  car.idle_integral = 0.0f;
+
   float total_load = car.mass * LCC_GRAVITY;
   float front_axle_static = total_load * (1.0f - car.cg_position);
   float rear_axle_static = total_load * car.cg_position;
@@ -380,9 +423,22 @@ void lcc_car_set_input(lcc_car_t *car, float throttle, float brake, float steeri
   car->steering = lcc_clamp(steering, -1.0f, 1.0f);
 }
 
+void lcc_car_set_clutch(lcc_car_t *car, float clutch) {
+  if (!car)
+    return;
+  car->clutch = lcc_clamp(clutch, 0.0f, 1.0f);
+}
+
+void lcc_car_enable_auto_clutch(lcc_car_t *car, int enabled) {
+  if (!car)
+    return;
+  car->auto_clutch = enabled ? 1 : 0;
+}
+
 void lcc_car_update(lcc_car_t *car, float dt) {
   if (!car || dt <= 0.0f)
     return;
+
   const float low_speed_threshold = 0.5f;
   const float wheel_omega_snap = 1.5f;
   const float max_wheel_alpha = 5000.0f;
@@ -390,6 +446,13 @@ void lcc_car_update(lcc_car_t *car, float dt) {
   const float linear_damping = 0.999f;
   const int   max_substeps = 5;
   const float target_substep_dt = 0.01f;
+
+  const float wheel_visc_damp = 0.05f; /* Nm*s/rad */
+  const float wheel_coulomb = 0.25f;   /* Nm      */
+
+  const float brake_hold_speed = 0.12f;    /* m/s, below this we can hard-stop */
+  const float brake_hold_brake_min = 0.5f; /* brake input to allow hold */
+  const float brake_hold_yaw = 0.25f;      /* rad/s, max yaw to allow hold */
 
   int steps = (int)ceilf(dt / target_substep_dt);
   if (steps < 1)
@@ -402,31 +465,76 @@ void lcc_car_update(lcc_car_t *car, float dt) {
   car->wheels[1].steer_angle = steer;
   car->wheels[2].steer_angle = 0.0f;
   car->wheels[3].steer_angle = 0.0f;
+
   for (int s = 0; s < steps; ++s) {
     float vehicle_speed = lcc_length(car->velocity);
+
+    car->gear = lcc_clampi(car->gear, 0, (car->num_gears > 0 ? car->num_gears - 1 : 0));
     float drivetrain_ratio = car->gear_ratios[car->gear] * car->final_drive;
+
     int   driven_count = 0;
     float avg_wheel_omega = 0.0f;
     for (int i = 0; i < 4; ++i) {
       if (lcc_is_wheel_driven(car, i)) {
-        avg_wheel_omega += fabsf(car->wheels[i].angular_velocity);
+        avg_wheel_omega += car->wheels[i].angular_velocity;
         driven_count++;
       }
     }
     if (driven_count > 0)
       avg_wheel_omega /= (float)driven_count;
-    float engine_rpm = avg_wheel_omega * (60.0f / (2.0f * LCC_PI)) * drivetrain_ratio;
-    float upshift_rpm = 0.98f * car->redline_rpm;
-    float downshift_rpm = fmaxf(1.4f * car->idle_rpm, 0.35f * car->peak_rpm);
-    if (engine_rpm > upshift_rpm && car->gear < car->num_gears - 1) {
-      car->gear++;
-      drivetrain_ratio = car->gear_ratios[car->gear] * car->final_drive;
-      engine_rpm = avg_wheel_omega * (60.0f / (2.0f * LCC_PI)) * drivetrain_ratio;
-    } else if (engine_rpm < downshift_rpm && car->gear > 0) {
-      car->gear--;
-      drivetrain_ratio = car->gear_ratios[car->gear] * car->final_drive;
-      engine_rpm = avg_wheel_omega * (60.0f / (2.0f * LCC_PI)) * drivetrain_ratio;
+
+    /* true engine rpm */
+    float engine_rpm = car->engine_omega * (60.0f / (2.0f * LCC_PI));
+
+    {
+      float upshift_rpm = 0.98f * car->redline_rpm;
+      float downshift_rpm = fmaxf(1.4f * car->idle_rpm, 0.35f * car->peak_rpm);
+      int   allow_shift = (vehicle_speed > 1.0f) && (car->clutch > 0.95f);
+      if (allow_shift && engine_rpm > upshift_rpm && car->gear < car->num_gears - 1) {
+        car->gear++;
+        car->gear = lcc_clampi(car->gear, 0, car->num_gears - 1);
+        drivetrain_ratio = car->gear_ratios[car->gear] * car->final_drive;
+        engine_rpm = car->engine_omega * (60.0f / (2.0f * LCC_PI));
+      } else if (allow_shift && engine_rpm < downshift_rpm && car->gear > 0) {
+        car->gear--;
+        car->gear = lcc_clampi(car->gear, 0, car->num_gears - 1);
+        drivetrain_ratio = car->gear_ratios[car->gear] * car->final_drive;
+        engine_rpm = car->engine_omega * (60.0f / (2.0f * LCC_PI));
+      }
     }
+
+    if (car->auto_clutch) {
+      float rpm_margin = 1.05f * car->idle_rpm;
+      float throttle_pos = fmaxf(0.0f, car->throttle);
+
+      float target = 1.0f;
+
+      if (car->brake > 0.3f && vehicle_speed < 2.0f && throttle_pos < 0.05f) {
+        target = 0.0f;
+      } else {
+        if (engine_rpm < rpm_margin) {
+          target = fminf(target, 0.05f);
+        }
+
+        if (vehicle_speed < 1.0f) {
+          float engage = lcc_clamp((throttle_pos - 0.05f) / 0.30f, 0.0f, 1.0f);
+          float base = 0.02f; /* tiny baseline just to take up slack */
+          target = fmaxf(target, base + (1.0f - base) * engage);
+        } else {
+          target = 1.0f;
+        }
+      }
+
+      float max_delta = (0.5f * car->clutch_engagement_rate) * subdt;
+      if (car->clutch < target)
+        car->clutch = fminf(car->clutch + max_delta, target);
+      else
+        car->clutch = fmaxf(car->clutch - max_delta, target);
+
+      car->clutch = lcc_clamp(car->clutch, 0.0f, 1.0f);
+    }
+
+    /* Engine and clutch torque flow */
     float throttle_pos = fmaxf(0.0f, car->throttle);
     float throttle_neg = -fminf(0.0f, car->throttle);
     float eng_torque = lcc_engine_torque(car, engine_rpm, throttle_pos);
@@ -435,16 +543,49 @@ void lcc_car_update(lcc_car_t *car, float dt) {
     float rpm_norm = lcc_clamp((engine_rpm - car->idle_rpm) / fmaxf(car->redline_rpm - car->idle_rpm, 1.0f), 0.0f, 1.0f);
     float eng_brake_factor = 0.2f + 0.6f * rpm_norm * rpm_norm;
     float eng_brake_torque = throttle_neg * eng_brake_factor * T_peak_for_brake;
-    float axle_torque = (eng_torque - eng_brake_torque) * drivetrain_ratio * car->transmission_efficiency;
+
+    float eng_fric_torque = car->engine_friction_coeff * car->engine_omega;
+
+    float T_engine_net = eng_torque - eng_brake_torque - eng_fric_torque;
+
+    if (throttle_pos < 0.05f) {
+      const float idle_target_rpm = 1.03f * car->idle_rpm;
+      const float idle_target_omega = idle_target_rpm * (2.0f * LCC_PI / 60.0f);
+      float       err = idle_target_omega - car->engine_omega;
+      /* Integrator with clamping */
+      car->idle_integral += car->idle_ki * err * subdt;
+      car->idle_integral = lcc_clamp(car->idle_integral, 0.0f, car->idle_torque_max);
+      float T_idle = car->idle_kp * err + car->idle_integral;
+      T_idle = lcc_clamp(T_idle, 0.0f, car->idle_torque_max);
+      T_engine_net += T_idle;
+    }
+
+    float driveline_omega = avg_wheel_omega * drivetrain_ratio;
+    float slip_omega = car->engine_omega - driveline_omega;
+
+    float T_cap = car->clutch_max_torque * lcc_clamp(car->clutch, 0.0f, 1.0f);
+    float T_sync = car->clutch_stiffness * slip_omega;
+    float T_clutch = lcc_clamp(T_sync, -T_cap, T_cap);
+
+    float Iw_engine = fmaxf(car->flywheel_inertia, 1e-5f);
+    float alpha_engine = (T_engine_net - T_clutch) / Iw_engine;
+    car->engine_omega += alpha_engine * subdt;
+
+    float min_omega = 0.5f * car->idle_rpm * (2.0f * LCC_PI / 60.0f);
+    float redline_omega = car->redline_rpm * (2.0f * LCC_PI / 60.0f);
+    car->engine_omega = lcc_clamp(car->engine_omega, min_omega, redline_omega);
+
+    float axle_torque_total = T_clutch * drivetrain_ratio * car->transmission_efficiency;
+
     float drive_torque[4] = {0};
-    if (axle_torque != 0.0f) {
-      if (car->drive_type == 0)
-        lcc_split_axle_torque(car, 2, 3, axle_torque, drive_torque);
-      else if (car->drive_type == 1)
-        lcc_split_axle_torque(car, 0, 1, axle_torque, drive_torque);
-      else {
-        lcc_split_axle_torque(car, 0, 1, 0.5f * axle_torque, drive_torque);
-        lcc_split_axle_torque(car, 2, 3, 0.5f * axle_torque, drive_torque);
+    if (axle_torque_total != 0.0f) {
+      if (car->drive_type == 0) /* RWD */
+        lcc_split_axle_torque(car, 2, 3, axle_torque_total, drive_torque);
+      else if (car->drive_type == 1) /* FWD */
+        lcc_split_axle_torque(car, 0, 1, axle_torque_total, drive_torque);
+      else { /* AWD */
+        lcc_split_axle_torque(car, 0, 1, 0.5f * axle_torque_total, drive_torque);
+        lcc_split_axle_torque(car, 2, 3, 0.5f * axle_torque_total, drive_torque);
       }
     }
     float brake_torque[4] = {0};
@@ -467,69 +608,61 @@ void lcc_car_update(lcc_car_t *car, float dt) {
       float wheel_world_angle = car->angle + w->steer_angle;
       float c = cosf(wheel_world_angle), s = sinf(wheel_world_angle);
       float v_long = wheel_vx * c + wheel_vy * s;
-      float v_lat = -wheel_vx * s + wheel_vy * c;
-      float speed_local = sqrtf(v_long * v_long + v_lat * v_lat);
-      if (speed_local > 0.05f || fabsf(w->angular_velocity) > 0.1f) {
+      if (vehicle_speed > 0.05f || fabsf(w->angular_velocity) > 0.1f) {
         w->slip_angle = lcc_calc_slip_angle(car, i);
         w->slip_ratio = lcc_calc_slip_ratio(car, i);
       } else {
         w->slip_angle = 0.0f;
         w->slip_ratio = 0.0f;
       }
-      float brake_t = brake_torque[i];
-      if (car->brake > 0.0f && brake_t > 0.0f) {
-        float sr = fabsf(w->slip_ratio);
-        if (sr > 0.2f) {
-          float scale = lcc_clamp(1.0f - 2.0f * (sr - 0.2f), 0.3f, 1.0f);
-          brake_t *= scale;
-        }
-      }
       float Fx_tire = 0.0f, Fy_tire = 0.0f;
       lcc_tire_forces(w->slip_angle, w->slip_ratio, w->load, w->grip, &Fx_tire, &Fy_tire, car->lateral_friction_scale);
       if (vehicle_speed < low_speed_threshold) {
-        float fac = lcc_clamp(vehicle_speed / low_speed_threshold, 0.0f, 1.0f);
-        Fy_tire *= fac;
-        Fx_tire *= (0.5f + 0.5f * fac);
+        Fy_tire *= lcc_clamp(vehicle_speed / low_speed_threshold, 0.0f, 1.0f);
       }
       float world_Fx = Fx_tire * c - Fy_tire * s;
       float world_Fy = Fx_tire * s + Fy_tire * c;
       total_force[0] += world_Fx;
       total_force[1] += world_Fy;
       total_torque += wp[0] * world_Fy - wp[1] * world_Fx;
-      float Iw = car->wheel_mass * w->radius * w->radius * car->wheel_inertia_bias;
-      Iw = fmaxf(Iw, 1e-5f);
+      float Iw = fmaxf(0.5f * car->wheel_mass * w->radius * w->radius * car->wheel_inertia_bias, 1e-5f);
       float reaction_torque = Fx_tire * w->radius;
-      float brake_dir = 0.0f;
-      if (car->brake > 0.0f && brake_t > 0.0f) {
-        if (fabsf(w->angular_velocity) > 0.5f) {
-          brake_dir = lcc_signf(w->angular_velocity);
-        } else if (fabsf(v_long) > 0.1f) {
-          brake_dir = lcc_signf(v_long) * 1.0f;
-        } else {
-          brake_dir = 1.0f;
-        }
-      }
-      float net_torque = drive_torque[i] - reaction_torque - brake_dir * brake_t;
+      float T_brake = -lcc_signf(w->angular_velocity) * brake_torque[i];
+      float T_bearing = -wheel_visc_damp * w->angular_velocity;
+      float T_coul = -wheel_coulomb * lcc_signf(w->angular_velocity);
+      if (fabsf(w->angular_velocity) < 0.05f)
+        T_coul = 0.0f;
+      float net_torque = drive_torque[i] - reaction_torque + T_brake + T_bearing + T_coul;
       float alpha = net_torque / Iw;
       alpha = lcc_clamp(alpha, -max_wheel_alpha, max_wheel_alpha);
       w->angular_velocity += alpha * subdt;
-      float coupling = 0.5f;
-      float target_omega = v_long / fmaxf(w->radius, 1e-4f);
-      float lerp_t = lcc_clamp(subdt * coupling, 0.0f, 1.0f);
-      w->angular_velocity = w->angular_velocity * (1.0f - lerp_t) + target_omega * lerp_t;
-      w->angular_velocity *= 0.998f;
-      if (fabsf(w->angular_velocity) < wheel_omega_snap && car->brake > 0.2f && fabsf(v_long) < 0.5f) {
+      if (fabsf(w->angular_velocity) < wheel_omega_snap && car->brake > 0.2f && fabsf(v_long) < 0.5f)
         w->angular_velocity = 0.0f;
-      }
       const float maxomega = 2000.0f;
       w->angular_velocity = lcc_clamp(w->angular_velocity, -maxomega, maxomega);
     }
+
+    /* aerodynamic drag */
     float speed = lcc_length(car->velocity);
     if (speed > 0.01f) {
       float drag = 0.5f * car->air_density * car->drag_coeff * car->frontal_area * speed * speed;
       total_force[0] += -drag * car->velocity[0] / speed;
       total_force[1] += -drag * car->velocity[1] / speed;
     }
+    int hold_ok = 0;
+    if (car->brake >= brake_hold_brake_min && lcc_length(car->velocity) < brake_hold_speed && fabsf(car->angular_velocity) < brake_hold_yaw) {
+      hold_ok = 1;
+    }
+    if (hold_ok) {
+      car->velocity[0] = 0.0f;
+      car->velocity[1] = 0.0f;
+      car->angular_velocity = 0.0f;
+      for (int i = 0; i < 4; ++i) {
+        car->wheels[i].angular_velocity = 0.0f;
+      }
+    }
+
+    /* update vehicle state */
     float accel[2] = {total_force[0] / car->mass, total_force[1] / car->mass};
     car->velocity[0] += accel[0] * subdt;
     car->velocity[1] += accel[1] * subdt;
@@ -553,6 +686,6 @@ void lcc_car_update(lcc_car_t *car, float dt) {
 
 const char *lcc_get_version(void) { return LCC_VERSION; }
 
-#endif
+#endif /* LIBCCAR_IMPLEMENTATION */
 
-#endif
+#endif /* LIBCCAR_H */

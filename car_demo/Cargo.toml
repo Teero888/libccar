@@ -6,3 +6,6 @@ edition = "2021"
 [dependencies]
 eframe = "0.32.0"
 libloading = "0.8"
+
+[profile.release]
+debug = true
