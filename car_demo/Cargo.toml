@@ -1,11 +1,21 @@
 [package]
-name = "car_demo"
+name = "libccar_demo"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-eframe = "0.32.0"
-libloading = "0.8"
+eframe = "0.27"
+egui = "0.27"
+egui_extras = "0.27"
+egui_plot = "0.27"
+glam = "0.27"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+csv = "1.3"
+rfd = "0.14"
+anyhow = "1.0"
+once_cell = "1.18"
+time = { version = "0.3", features = ["formatting"] }
 
-[profile.release]
-debug = true
+[build-dependencies]
+bindgen = "0.70"
