@@ -359,18 +359,13 @@ static void lcc_transmission_physics(lcc_car_t *car) {
 
   /* ---------------- Driven wheels and shaft speeds ---------------- */
   int drivenMask[4] = { 0, 0, 0, 0 };
-  switch (t->drive_type) {
-    case LCC_DRIVE_RWD:
-      drivenMask[2] = drivenMask[3] = 1;
-      break;
-    case LCC_DRIVE_FWD:
-      drivenMask[0] = drivenMask[1] = 1;
-      break;
-    case LCC_DRIVE_AWD:
-      for(int i = 0; i < 4; ++i) drivenMask[i] = 1;
-      break;
-    default:
-      break;
+  switch(t->drive_type) {
+  case LCC_DRIVE_RWD: drivenMask[2] = drivenMask[3] = 1; break;
+  case LCC_DRIVE_FWD: drivenMask[0] = drivenMask[1] = 1; break;
+  case LCC_DRIVE_AWD:
+    for(int i = 0; i < 4; ++i) drivenMask[i] = 1;
+    break;
+  default: break;
   }
   float sum_w = 0.0f;
   int   cnt_w = 0;
@@ -408,21 +403,20 @@ static void lcc_transmission_physics(lcc_car_t *car) {
   float T_prop         = T_c * gr * eff; /* gearbox output (propshaft) */
   float T_wheels_total = T_prop * Rf; /* sum torque at driven hubs */
   float TfL = 0, TfR = 0, TrL = 0, TrR = 0;
-  switch (t->drive_type) {
-    case LCC_DRIVE_RWD:
-      lcc_lsd_split(&car->differential, T_wheels_total, car->wheels[2].angular_velocity, car->wheels[3].angular_velocity, &TrL, &TrR);
-      break;
-    case LCC_DRIVE_FWD:
-      lcc_lsd_split(&car->differential, T_wheels_total, car->wheels[0].angular_velocity, car->wheels[1].angular_velocity, &TfL, &TfR);
-      break;
-    case LCC_DRIVE_AWD: {
-      float T_axle = 0.5f * T_wheels_total;
-      lcc_lsd_split(&car->differential, T_axle, car->wheels[0].angular_velocity, car->wheels[1].angular_velocity, &TfL, &TfR);
-      lcc_lsd_split(&car->differential, T_axle, car->wheels[2].angular_velocity, car->wheels[3].angular_velocity, &TrL, &TrR);
-      break;
-    }
-    default:
-      break;
+  switch(t->drive_type) {
+  case LCC_DRIVE_RWD:
+    lcc_lsd_split(&car->differential, T_wheels_total, car->wheels[2].angular_velocity, car->wheels[3].angular_velocity, &TrL, &TrR);
+    break;
+  case LCC_DRIVE_FWD:
+    lcc_lsd_split(&car->differential, T_wheels_total, car->wheels[0].angular_velocity, car->wheels[1].angular_velocity, &TfL, &TfR);
+    break;
+  case LCC_DRIVE_AWD: {
+    float T_axle = 0.5f * T_wheels_total;
+    lcc_lsd_split(&car->differential, T_axle, car->wheels[0].angular_velocity, car->wheels[1].angular_velocity, &TfL, &TfR);
+    lcc_lsd_split(&car->differential, T_axle, car->wheels[2].angular_velocity, car->wheels[3].angular_velocity, &TrL, &TrR);
+    break;
+  }
+  default: break;
   }
   /* apply shit */
   car->wheels[0].drive_torque = TfL;
@@ -657,6 +651,34 @@ static void lcc_vehicle_step(lcc_car_t *car) {
   lcc_compute_loads(car, Vb[0], Vb[1], DFf, DFr);
 }
 
+/* ---------- ackermann steering model ---------- */
+/* https://en.wikipedia.org/wiki/Ackermann_steering_geometry */
+static void ackermann_steering(const lcc_car_t *car, float steering_input, float *out_angle_i, float *out_angle_o) {
+  float max_sa = 40.0f * (LCC_PI / 180.0f);
+
+  if(fabsf(steering_input) < LCC_EPS) {
+    *out_angle_i = 0.0f;
+    *out_angle_o = 0.0f;
+  } else {
+    float L           = car->wheelbase;
+    float T           = car->track_width;
+    float delta       = -steering_input * max_sa;
+    float R           = L / tanf(fabsf(delta));
+    float abs_angle_i = atanf(L / (R - 0.5f * T));
+    float abs_angle_o = atanf(L / (R + 0.5f * T));
+    float sign        = lcc_sign(delta);
+    float angle_i     = abs_angle_i * sign;
+    float angle_o     = abs_angle_o * sign;
+    if(steering_input > 0.0f) {
+      *out_angle_i = angle_o;
+      *out_angle_o = angle_i;
+    } else {
+      *out_angle_i = angle_i;
+      *out_angle_o = angle_o;
+    }
+  }
+}
+
 /* ---------- API impl ---------- */
 void lcc_car_shift_up(lcc_car_t *car) {
   if(car->transmission.current_gear < car->transmission.num_gears) car->transmission.current_gear++;
@@ -682,19 +704,15 @@ void lcc_car_update(lcc_car_t *car, float dt) {
   car->timestep = dt;
   car->simulation_time += dt;
 
-  /* steering: equal front steer (TODO: mabye look at ackermann steergin later) */
-  float max_sa               = 40.0f * (LCC_PI / 180.0f);
-  float sa                   = -lcc_clamp(car->steering_input, -1.0f, 1.0f) * max_sa;
-  car->wheels[0].steer_angle = sa;
-  car->wheels[1].steer_angle = sa;
-  car->wheels[2].steer_angle = 0.0f;
-  car->wheels[3].steer_angle = 0.0f;
+  ackermann_steering(car, car->steering_input, &car->wheels[0].steer_angle, &car->wheels[1].steer_angle);
+  /* four wheel steering xd ackermann_steering(car, -car->steering_input, &car->wheels[3].steer_angle, &car->wheels[2].steer_angle); */
 
   /* throttle filter */
   float tau             = fmaxf(car->engine.response_time, 1e-3f);
   float k               = 1.0f - expf(-dt / tau);
   float target_throttle = lcc_clamp(car->throttle_input, 0.0f, 1.0f);
   car->engine.throttle  = lcc_lerp(car->engine.throttle, target_throttle, k);
+
   lcc_engine_physics(car);
   lcc_transmission_physics(car);
   for(int i = 0; i < 4; ++i) lcc_tire_step(car, i);
