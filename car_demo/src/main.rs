@@ -1,11 +1,11 @@
 #![allow(clippy::missing_safety_doc)]
 use eframe::{
     egui,
-    egui::{Color32, RichText, Stroke},
+    egui::{Color32, Painter, RichText, Stroke},
 };
 use egui::{vec2, Align2, Pos2, Rect};
 use egui_extras::{Size, StripBuilder};
-use egui_plot::{Line, Plot, PlotPoints};
+use egui_plot::{HLine, Legend, Line, Plot, PlotPoints};
 use glam::{Mat2, Vec2};
 use once_cell::sync::Lazy;
 use serde::Serialize;
@@ -33,8 +33,6 @@ enum ViewPreset {
     Sports,
     Supercar,
     Hypercar,
-    Track,
-    Custom,
 }
 
 impl ViewPreset {
@@ -45,8 +43,6 @@ impl ViewPreset {
             ViewPreset::Sports,
             ViewPreset::Supercar,
             ViewPreset::Hypercar,
-            ViewPreset::Track,
-            ViewPreset::Custom,
         ]
     }
     fn as_label(self) -> &'static str {
@@ -56,8 +52,6 @@ impl ViewPreset {
             ViewPreset::Sports => "Sports",
             ViewPreset::Supercar => "Supercar",
             ViewPreset::Hypercar => "Hypercar",
-            ViewPreset::Track => "Track",
-            ViewPreset::Custom => "Custom",
         }
     }
     fn to_c_enum(self) -> ffi::lcc_preset_t {
@@ -67,8 +61,6 @@ impl ViewPreset {
             ViewPreset::Sports => ffi::lcc_preset_t_LCC_PRESET_SPORTS,
             ViewPreset::Supercar => ffi::lcc_preset_t_LCC_PRESET_SUPERCAR,
             ViewPreset::Hypercar => ffi::lcc_preset_t_LCC_PRESET_HYPERCAR,
-            ViewPreset::Track => ffi::lcc_preset_t_LCC_PRESET_TRACK,
-            ViewPreset::Custom => ffi::lcc_preset_t_LCC_PRESET_CUSTOM,
         }
     }
 }
@@ -249,13 +241,40 @@ struct App {
     zoom: f32,
     follow_camera: bool,
     camera_pos: Vec2,
+
+    // visuals
+    path_trace: Vec<Vec2>,
+    max_trace_points: usize,
+    trace_point_spacing_m: f32,
+    show_trace: bool,
+
+    skid_segments: Vec<SkidSegment>,
+    skid_ttl: f32,
+    show_skids: bool,
+    slip_ratio_threshold: f32, // longitudinal slip threshold for skid mark
+    slip_angle_threshold: f32, // lateral slip threshold (rad) for skid mark
+    min_speed_for_skid_kmh: f32,
+
+    last_wheel_world: [Vec2; 4],
+    have_last_wheel_world: bool,
+}
+
+#[derive(Clone, Copy)]
+struct SkidSegment {
+    p0: Vec2,
+    p1: Vec2,
+    strength: f32, // 0..1, used as opacity/width
+    ttl: f32,      // remaining lifetime in seconds
 }
 
 struct Plots {
     rpm: Vec<(f32, f32)>,
     speed: Vec<(f32, f32)>,
-    temps: [Vec<(f32, f32)>; 4],
+    inputs: [Vec<(f32, f32)>; 4], // throttle, brake, clutch, steer (0..1)
+    slip_ratios: [Vec<(f32, f32)>; 4], // per wheel
+    yaw_rate: Vec<(f32, f32)>,    // rad/s
     start_time: Instant,
+    max_len: usize,
 }
 
 impl Plots {
@@ -263,28 +282,48 @@ impl Plots {
         Self {
             rpm: Vec::new(),
             speed: Vec::new(),
-            temps: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+            inputs: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+            slip_ratios: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+            yaw_rate: Vec::new(),
             start_time: Instant::now(),
+            max_len: 3000,
         }
     }
     fn t(&self) -> f32 {
         (Instant::now() - self.start_time).as_secs_f32()
     }
-    fn push(&mut self, rpm: f32, speed: f32, wheel_temps: [f32; 4]) {
+    fn push(
+        &mut self,
+        rpm: f32,
+        speed: f32,
+        inputs: [f32; 4],
+        slip_ratios: [f32; 4],
+        yaw_rate: f32,
+    ) {
         let t = self.t();
         self.rpm.push((t, rpm));
         self.speed.push((t, speed));
+        self.yaw_rate.push((t, yaw_rate));
         for i in 0..4 {
-            self.temps[i].push((t, wheel_temps[i]));
-            if self.temps[i].len() > 3000 {
-                self.temps[i].remove(0);
+            self.inputs[i].push((t, inputs[i]));
+            self.slip_ratios[i].push((t, slip_ratios[i]));
+            if self.slip_ratios[i].len() > self.max_len {
+                self.slip_ratios[i].remove(0);
             }
         }
-        if self.rpm.len() > 3000 {
+        if self.rpm.len() > self.max_len {
             self.rpm.remove(0);
         }
-        if self.speed.len() > 3000 {
+        if self.speed.len() > self.max_len {
             self.speed.remove(0);
+        }
+        if self.yaw_rate.len() > self.max_len {
+            self.yaw_rate.remove(0);
+        }
+        for i in 0..4 {
+            if self.inputs[i].len() > self.max_len {
+                self.inputs[i].remove(0);
+            }
         }
     }
 }
@@ -306,6 +345,22 @@ impl App {
             zoom: 32.0,
             follow_camera: true,
             camera_pos: Vec2::ZERO,
+
+            skid_segments: Vec::new(),
+            skid_ttl: 6.0,
+            show_skids: true,
+            slip_ratio_threshold: 0.15,
+            slip_angle_threshold: 0.12,
+            min_speed_for_skid_kmh: 10.0,
+
+            last_wheel_world: [Vec2::ZERO; 4],
+            have_last_wheel_world: false,
+
+            // --- Add the missing fields below ---
+            max_trace_points: 4000,
+            path_trace: Vec::new(),
+            show_trace: true,
+            trace_point_spacing_m: 0.25,
         };
         this.center_camera_on_car();
         this
@@ -325,6 +380,10 @@ impl App {
         self.plots = Plots::new();
         self.telemetry.clear();
         self.center_camera_on_car();
+
+        self.path_trace.clear();
+        self.skid_segments.clear();
+        self.have_last_wheel_world = false;
     }
 
     unsafe fn handle_input(&mut self, ctx: &egui::Context) {
@@ -377,6 +436,7 @@ impl App {
         let speed_kmh = ffi::lcc_car_get_speed(&self.car);
         let rpm = ffi::lcc_car_get_engine_rpm(&self.car);
 
+        // Telemetry sample as before
         let wheels = [
             {
                 let w = self.car.wheels[0];
@@ -437,19 +497,82 @@ impl App {
             clutch: self.car.clutch_input,
             wheels,
         };
-
         self.telemetry.push(sample.clone());
 
+        // Push to plots (more meaningful data)
         self.plots.push(
             rpm as f32,
             speed_kmh as f32,
             [
-                self.car.wheels[0].temperature as f32,
-                self.car.wheels[1].temperature as f32,
-                self.car.wheels[2].temperature as f32,
-                self.car.wheels[3].temperature as f32,
+                self.car.throttle_input,
+                self.car.brake_input,
+                self.car.clutch_input,
+                // normalize steer from [-1..1] to [0..1] to plot alongside other inputs
+                (self.car.steering_input + 1.0) * 0.5,
             ],
+            [
+                self.car.wheels[0].slip_ratio as f32,
+                self.car.wheels[1].slip_ratio as f32,
+                self.car.wheels[2].slip_ratio as f32,
+                self.car.wheels[3].slip_ratio as f32,
+            ],
+            self.car.angular_velocity as f32,
         );
+
+        // Path trace (store car center position every ~0.25 m)
+        let pos = self.world_pos();
+        if self
+            .path_trace
+            .last()
+            .map_or(true, |p| (*p - pos).length() > self.trace_point_spacing_m)
+        {
+            self.path_trace.push(pos);
+            if self.path_trace.len() > self.max_trace_points {
+                let overflow = self.path_trace.len() - self.max_trace_points;
+                self.path_trace.drain(0..overflow);
+            }
+        }
+
+        // Skid marks
+        let rot = Mat2::from_angle(self.car.angle);
+        let mut wheel_world = [Vec2::ZERO; 4];
+        for i in 0..4 {
+            let w = &self.car.wheels[i];
+            let wp = Vec2::new(w.position[0], w.position[1]);
+            wheel_world[i] = pos + rot * wp;
+        }
+        if !self.have_last_wheel_world {
+            self.last_wheel_world = wheel_world;
+            self.have_last_wheel_world = true;
+        } else {
+            for i in 0..4 {
+                let w = &self.car.wheels[i];
+                let sr = w.slip_ratio.abs() as f32;
+                let sa = w.slip_angle.abs() as f32;
+                // normalized slip severity
+                let long = sr / self.slip_ratio_threshold;
+                let lat = sa / self.slip_angle_threshold;
+                let severity = long.max(lat).min(3.0); // cap
+                let moving = speed_kmh > self.min_speed_for_skid_kmh;
+                let loaded = w.load > 50.0; // prevent skids while airborne
+                if self.show_skids && moving && loaded && severity >= 1.0 {
+                    let strength = ((severity - 1.0) / 2.0).clamp(0.2, 1.0); // map into 0.2..1.0
+                    self.skid_segments.push(SkidSegment {
+                        p0: self.last_wheel_world[i],
+                        p1: wheel_world[i],
+                        strength,
+                        ttl: self.skid_ttl,
+                    });
+                }
+                self.last_wheel_world[i] = wheel_world[i];
+            }
+        }
+
+        // Fade old skid segments
+        for seg in &mut self.skid_segments {
+            seg.ttl -= dt;
+        }
+        self.skid_segments.retain(|s| s.ttl > 0.0);
     }
 
     unsafe fn step_sim(&mut self, ctx: &egui::Context) {
@@ -465,7 +588,7 @@ impl App {
 
         self.accumulator += dt;
         while self.accumulator >= self.fixed_dt {
-            self.fixed_update(self.fixed_dt);
+            self.fixed_update(dt);
             self.accumulator -= self.fixed_dt;
         }
 
@@ -483,6 +606,41 @@ impl App {
         let center = rect.center();
 
         draw_grid(&painter, rect, self.camera_pos, self.zoom);
+        // Path trace
+        if self.show_trace && self.path_trace.len() > 1 {
+            let to_screen = |w: Vec2| -> Pos2 {
+                let rel = w - self.camera_pos;
+                let screen = Vec2::new(rel.x * self.zoom, -rel.y * self.zoom);
+                Pos2::new(center.x + screen.x, center.y + screen.y)
+            };
+            let pts: Vec<Pos2> = self.path_trace.iter().map(|&p| to_screen(p)).collect();
+            painter.add(egui::Shape::line(
+                pts,
+                Stroke {
+                    width: 1.5,
+                    color: Color32::from_rgb(60, 200, 255).gamma_multiply(0.55),
+                },
+            ));
+        }
+
+        // Skid marks (fade with time and strength)
+        if self.show_skids && !self.skid_segments.is_empty() {
+            let to_screen = |w: Vec2| -> Pos2 {
+                let rel = w - self.camera_pos;
+                let screen = Vec2::new(rel.x * self.zoom, -rel.y * self.zoom);
+                Pos2::new(center.x + screen.x, center.y + screen.y)
+            };
+            for seg in &self.skid_segments {
+                let life = (seg.ttl / self.skid_ttl).clamp(0.0, 1.0);
+                let alpha = (200.0 * life * seg.strength) as u8;
+                let width = 2.0 + 1.5 * seg.strength;
+                let col = Color32::from_black_alpha(alpha);
+                painter.line_segment(
+                    [to_screen(seg.p0), to_screen(seg.p1)],
+                    Stroke::new(width, col),
+                );
+            }
+        }
 
         unsafe {
             let to_screen = |w: Vec2| -> Pos2 {
@@ -530,12 +688,11 @@ impl App {
             }
         }
     }
-
     fn draw_side_panel(&mut self, ui: &mut egui::Ui) {
         ui.spacing_mut().slider_width = 180.0;
 
         ui.horizontal(|ui| {
-            ui.heading(RichText::new("libccar Debugger").color(Color32::LIGHT_GREEN));
+            ui.heading(RichText::new("libccar demo").color(Color32::LIGHT_GREEN));
             ui.label(format!("v{}", *VERSION));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Reset").clicked() {
@@ -589,7 +746,34 @@ impl App {
         ui.collapsing("Controls", |ui| {
             ui.monospace("a/d = steer\nw/s = shift\nh = clutch\nj = brake\nk = throttle");
         });
-
+        ui.separator();
+        ui.collapsing("Visuals", |ui| {
+            ui.checkbox(&mut self.show_trace, "Show path trace");
+            ui.checkbox(&mut self.show_skids, "Show skid marks");
+            ui.add(
+                egui::Slider::new(&mut self.trace_point_spacing_m, 0.05..=1.0)
+                    .text("Trace spacing (m)"),
+            );
+            ui.horizontal(|ui| {
+                if ui.button("Clear traces").clicked() {
+                    self.path_trace.clear();
+                    self.skid_segments.clear();
+                }
+            });
+            ui.add(
+                egui::Slider::new(&mut self.slip_ratio_threshold, 0.05..=0.5)
+                    .text("Skid slip ratio threshold"),
+            );
+            ui.add(
+                egui::Slider::new(&mut self.slip_angle_threshold, 0.05..=0.5)
+                    .text("Skid slip angle threshold (rad)"),
+            );
+            ui.add(
+                egui::Slider::new(&mut self.min_speed_for_skid_kmh, 0.0..=40.0)
+                    .text("Min speed for skids (km/h)"),
+            );
+            ui.add(egui::Slider::new(&mut self.skid_ttl, 1.0..=12.0).text("Skid mark fade (s)"));
+        });
         ui.separator();
         ui.collapsing("Telemetry", |ui| {
             ui.horizontal(|ui| {
@@ -632,54 +816,114 @@ impl App {
     }
 
     fn draw_bottom_panel(&mut self, ui: &mut egui::Ui) {
+        // ...existing code...
         StripBuilder::new(ui)
-            .sizes(Size::remainder(), 1)
+            .sizes(Size::exact(200.0), 1)
             .vertical(|mut strip| {
                 strip.cell(|ui| {
-                    ui.set_height(220.0);
-                    ui.columns(2, |cols| {
-                        cols[0].vertical(|ui| {
-                            Plot::new("rpm_plot").height(100.0).show(ui, |pui| {
-                                let pts = PlotPoints::from_iter(
-                                    self.plots.rpm.iter().map(|&(x, y)| [x as f64, y as f64]),
-                                );
-                                let rpm_line =
-                                    Line::new(pts).color(Color32::LIGHT_YELLOW).name("RPM");
-                                pui.line(rpm_line);
-                            });
-                            Plot::new("speed_plot").height(100.0).show(ui, |pui| {
-                                let pts = PlotPoints::from_iter(
-                                    self.plots.speed.iter().map(|&(x, y)| [x as f64, y as f64]),
-                                );
-                                let sp_line = Line::new(pts)
-                                    .color(Color32::LIGHT_GREEN)
-                                    .name("Speed (km/h)");
-                                pui.line(sp_line);
-                            });
-                        });
+                    // Two columns that fill height
+                    StripBuilder::new(ui)
+                        .sizes(Size::relative(0.5), 2)
+                        .horizontal(|mut hstrip| {
+                            // Left column: RPM Speed
+                            hstrip.cell(|ui| {
+                                let col_h = ui.available_height();
+                                let half = (col_h - 6.0) * 0.5;
 
-                        cols[1].vertical(|ui| {
-                            Plot::new("wheel_temps").height(210.0).show(ui, |pui| {
-                                let colors = [
-                                    Color32::from_rgb(255, 80, 80),
-                                    Color32::from_rgb(255, 150, 50),
-                                    Color32::from_rgb(50, 200, 255),
-                                    Color32::from_rgb(180, 120, 255),
-                                ];
-                                for i in 0..4 {
-                                    let pts = PlotPoints::from_iter(
-                                        self.plots.temps[i]
-                                            .iter()
-                                            .map(|&(x, y)| [x as f64, y as f64]),
-                                    );
-                                    let line = Line::new(pts)
-                                        .color(colors[i])
-                                        .name(format!("Wheel {i} temp"));
-                                    pui.line(line);
-                                }
+                                // RPM plot
+                                Plot::new("rpm_plot")
+                                    .legend(Legend::default())
+                                    .height(half)
+                                    .show(ui, |pui| {
+                                        let pts = PlotPoints::from_iter(
+                                            self.plots
+                                                .rpm
+                                                .iter()
+                                                .map(|&(x, y)| [x as f64, y as f64]),
+                                        );
+                                        pui.line(
+                                            Line::new("RPM", pts).color(Color32::LIGHT_YELLOW),
+                                        );
+                                    });
+
+                                // Speed plot
+                                Plot::new("speed_plot")
+                                    .legend(Legend::default())
+                                    .height(half)
+                                    .show(ui, |pui| {
+                                        let pts = PlotPoints::from_iter(
+                                            self.plots
+                                                .speed
+                                                .iter()
+                                                .map(|&(x, y)| [x as f64, y as f64]),
+                                        );
+                                        pui.line(
+                                            Line::new("Speed (km/h)", pts)
+                                                .color(Color32::LIGHT_GREEN),
+                                        );
+                                    });
+                            });
+
+                            // Right column: Inputs + Slip ratios
+                            hstrip.cell(|ui| {
+                                let col_h = ui.available_height();
+                                let half = (col_h - 6.0) * 0.5;
+
+                                // Driver inputs (0..1)
+                                Plot::new("inputs_plot")
+                                    .legend(Legend::default())
+                                    .height(half)
+                                    .show(ui, |pui| {
+                                        let names = ["Throttle", "Brake", "Clutch", "Steer"];
+                                        let colors = [
+                                            Color32::from_rgb(100, 220, 100),
+                                            Color32::from_rgb(230, 100, 100),
+                                            Color32::from_rgb(100, 160, 230),
+                                            Color32::from_rgb(240, 200, 80),
+                                        ];
+                                        for i in 0..4 {
+                                            let pts = PlotPoints::from_iter(
+                                                self.plots.inputs[i]
+                                                    .iter()
+                                                    .map(|&(x, y)| [x as f64, y as f64]),
+                                            );
+                                            pui.line(Line::new(names[i], pts).color(colors[i]));
+                                        }
+                                        // Remove include_y (no longer in egui_plot)
+                                        // pui.include_y(0.0);
+                                        // pui.include_y(1.0);
+                                    });
+
+                                // Tire slip ratio per wheel
+                                Plot::new("slip_plot")
+                                    .legend(Legend::default())
+                                    .height(half)
+                                    .show(ui, |pui| {
+                                        let colors = [
+                                            Color32::from_rgb(255, 80, 80),   // FL
+                                            Color32::from_rgb(255, 150, 50),  // FR
+                                            Color32::from_rgb(50, 200, 255),  // RL
+                                            Color32::from_rgb(180, 120, 255), // RR
+                                        ];
+                                        for i in 0..4 {
+                                            let pts = PlotPoints::from_iter(
+                                                self.plots.slip_ratios[i]
+                                                    .iter()
+                                                    .map(|&(x, y)| [x as f64, y as f64]),
+                                            );
+                                            pui.line(
+                                                Line::new(format!("W{i} slip ratio"), pts)
+                                                    .color(colors[i]),
+                                            );
+                                        }
+                                        // show +/- 1 slip band
+                                        pui.hline(HLine::new("", 0.0).color(Color32::GRAY));
+                                        // Remove include_y (no longer in egui_plot)
+                                        // pui.include_y(-1.0);
+                                        // pui.include_y(1.0);
+                                    });
                             });
                         });
-                    });
                 });
             });
     }
@@ -794,7 +1038,7 @@ fn smooth_approach(v: f32, target: f32, rise: f32, fall: f32) -> f32 {
     lerp(v, target, k)
 }
 
-fn draw_grid(painter: &egui::Painter, rect: Rect, cam: Vec2, zoom: f32) {
+fn draw_grid(painter: &Painter, rect: Rect, cam: Vec2, zoom: f32) {
     let grid_color = Color32::from_gray(40);
     let bold_color = Color32::from_gray(60);
     let step_world = 1.0;
@@ -904,6 +1148,8 @@ unsafe fn draw_wheel(
 fn draw_rpm_gauge(painter: &egui::Painter, origin: Pos2, rpm: f32, redline: f32) {
     let radius = 60.0;
     let bg = Color32::from_gray(40);
+
+    // Outer circle
     painter.circle(
         origin,
         radius,
@@ -911,11 +1157,49 @@ fn draw_rpm_gauge(painter: &egui::Painter, origin: Pos2, rpm: f32, redline: f32)
         Stroke::new(2.0, bg),
     );
 
+    // Arc range
     let start_angle = -0.75 * PI;
     let end_angle = 0.75 * PI;
+
+    // Color-coded arc (green->yellow->red)
+    let arc = |from_t: f32, to_t: f32, col: Color32, width: f32| {
+        let steps = 32;
+        let mut pts = Vec::with_capacity(steps + 1);
+        for i in 0..=steps {
+            let tt = lerp(from_t, to_t, i as f32 / steps as f32);
+            let ang = start_angle + (end_angle - start_angle) * tt;
+            let r = radius - 4.0;
+            pts.push(Pos2::new(
+                origin.x + r * ang.cos(),
+                origin.y + r * ang.sin(),
+            ));
+        }
+        painter.add(egui::Shape::line(pts, Stroke::new(width, col)));
+    };
+
+    // Zones relative to redline
+    arc(0.0, 0.7, Color32::from_rgb(90, 200, 90), 5.0); // green
+    arc(0.7, 0.9, Color32::from_rgb(240, 200, 80), 5.0); // yellow
+    arc(0.9, 1.0, Color32::from_rgb(220, 70, 70), 5.0); // red
+
+    // Tick marks every 1/8th
+    for i in 0..=8 {
+        let t = i as f32 / 8.0;
+        let ang = start_angle + (end_angle - start_angle) * t;
+        let r0 = radius - 2.0;
+        let r1 = if i % 2 == 0 {
+            radius - 12.0
+        } else {
+            radius - 8.0
+        };
+        let p0 = Pos2::new(origin.x + r0 * ang.cos(), origin.y + r0 * ang.sin());
+        let p1 = Pos2::new(origin.x + r1 * ang.cos(), origin.y + r1 * ang.sin());
+        painter.line_segment([p0, p1], Stroke::new(2.0, Color32::from_gray(120)));
+    }
+
+    // Needle
     let t = (rpm / redline).clamp(0.0, 1.0);
     let needle_angle = start_angle + (end_angle - start_angle) * t;
-
     let needle_len = radius * 0.9;
     let tip = Pos2::new(
         origin.x + needle_len * needle_angle.cos(),
@@ -923,6 +1207,7 @@ fn draw_rpm_gauge(painter: &egui::Painter, origin: Pos2, rpm: f32, redline: f32)
     );
     painter.line_segment([origin, tip], Stroke::new(3.0, Color32::LIGHT_RED));
 
+    // Labels
     let label = format!("{:5.0} rpm", rpm);
     painter.text(
         Pos2::new(origin.x, origin.y + radius + 14.0),
@@ -930,6 +1215,13 @@ fn draw_rpm_gauge(painter: &egui::Painter, origin: Pos2, rpm: f32, redline: f32)
         label,
         egui::FontId::proportional(14.0),
         Color32::WHITE,
+    );
+    painter.text(
+        Pos2::new(origin.x, origin.y - radius - 16.0),
+        Align2::CENTER_CENTER,
+        format!("Redline: {:.0}", redline),
+        egui::FontId::proportional(12.0),
+        Color32::from_gray(180),
     );
 }
 
@@ -942,9 +1234,16 @@ fn draw_bar(painter: &egui::Painter, pos: Pos2, label: &str, value01: f32, color
         3.0,
         Color32::from_black_alpha(20),
         Stroke::new(1.0, Color32::from_gray(70)),
+        egui::StrokeKind::Inside, // <-- Add this argument
     );
     let fill = Rect::from_min_size(pos, vec2(w * value01.clamp(0.0, 1.0), h));
-    painter.rect(fill, 3.0, color.gamma_multiply(0.5), Stroke::NONE);
+    painter.rect(
+        fill,
+        3.0,
+        color.gamma_multiply(0.5),
+        Stroke::NONE,
+        egui::StrokeKind::Inside, // <-- Add this argument
+    );
     painter.text(
         Pos2::new(rect.left() - 6.0, rect.center().y),
         Align2::RIGHT_CENTER,
@@ -984,6 +1283,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "libccar Frontend",
         native_options,
-        Box::new(|_cc| Box::new(unsafe { App::new(ViewPreset::Sports) })),
+        Box::new(|_cc| Ok(Box::new(unsafe { App::new(ViewPreset::Sports) }))),
     )
 }
