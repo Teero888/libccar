@@ -103,8 +103,8 @@ typedef struct {
 } lcc_wheel_state_t;
 
 typedef struct {
-  float max_power; /* W (info) */
-  float max_torque; /* Nm @ peakTrpm scaled by curve */
+  float max_power; /* W */
+  float max_torque; /* Nm */
   float idle_rpm, max_rpm, redline_rpm;
   float inertia; /* kg*m^2 (crank equivalent) */
   float friction; /* linear viscous Nm/(rad/s) */
@@ -123,13 +123,13 @@ typedef struct {
 } lcc_engine_t;
 
 typedef struct {
-  int   num_gears; /* 1..8 */
-  float gear_ratios[8];
-  float final_drive;
-  float reverse_ratio;
-  float efficiency; /* 0..1 */
-  int   current_gear; /* -1..num_gears; 0=neutral */
-  int   drive_type; /* 0=RWD 1=FWD 2=AWD */
+  int         num_gears; /* 1..8 */
+  float       gear_ratios[8];
+  float       final_drive;
+  float       reverse_ratio;
+  float       efficiency; /* 0..1 */
+  int         current_gear; /* -1..num_gears; 0=neutral */
+  lcc_drive_t drive_type;
 } lcc_transmission_t;
 
 typedef struct {
@@ -359,15 +359,19 @@ static void lcc_transmission_physics(lcc_car_t *car) {
 
   /* ---------------- Driven wheels and shaft speeds ---------------- */
   int drivenMask[4] = { 0, 0, 0, 0 };
-  if(t->drive_type == 0) {
-    drivenMask[2] = drivenMask[3] = 1;
-  } /* RWD */
-  else if(t->drive_type == 1) {
-    drivenMask[0] = drivenMask[1] = 1;
-  } /* FWD */
-  else {
-    for(int i = 0; i < 4; ++i) drivenMask[i] = 1;
-  } /* AWD */
+  switch (t->drive_type) {
+    case LCC_DRIVE_RWD:
+      drivenMask[2] = drivenMask[3] = 1;
+      break;
+    case LCC_DRIVE_FWD:
+      drivenMask[0] = drivenMask[1] = 1;
+      break;
+    case LCC_DRIVE_AWD:
+      for(int i = 0; i < 4; ++i) drivenMask[i] = 1;
+      break;
+    default:
+      break;
+  }
   float sum_w = 0.0f;
   int   cnt_w = 0;
   for(int i = 0; i < 4; ++i)
@@ -404,14 +408,21 @@ static void lcc_transmission_physics(lcc_car_t *car) {
   float T_prop         = T_c * gr * eff; /* gearbox output (propshaft) */
   float T_wheels_total = T_prop * Rf; /* sum torque at driven hubs */
   float TfL = 0, TfR = 0, TrL = 0, TrR = 0;
-  if(t->drive_type == 0) { /* RWD */
-    lcc_lsd_split(&car->differential, T_wheels_total, car->wheels[2].angular_velocity, car->wheels[3].angular_velocity, &TrL, &TrR);
-  } else if(t->drive_type == 1) { /* FWD */
-    lcc_lsd_split(&car->differential, T_wheels_total, car->wheels[0].angular_velocity, car->wheels[1].angular_velocity, &TfL, &TfR);
-  } else { /* AWD: 50/50 split, then LSD on each axle */
-    float T_axle = 0.5f * T_wheels_total;
-    lcc_lsd_split(&car->differential, T_axle, car->wheels[0].angular_velocity, car->wheels[1].angular_velocity, &TfL, &TfR);
-    lcc_lsd_split(&car->differential, T_axle, car->wheels[2].angular_velocity, car->wheels[3].angular_velocity, &TrL, &TrR);
+  switch (t->drive_type) {
+    case LCC_DRIVE_RWD:
+      lcc_lsd_split(&car->differential, T_wheels_total, car->wheels[2].angular_velocity, car->wheels[3].angular_velocity, &TrL, &TrR);
+      break;
+    case LCC_DRIVE_FWD:
+      lcc_lsd_split(&car->differential, T_wheels_total, car->wheels[0].angular_velocity, car->wheels[1].angular_velocity, &TfL, &TfR);
+      break;
+    case LCC_DRIVE_AWD: {
+      float T_axle = 0.5f * T_wheels_total;
+      lcc_lsd_split(&car->differential, T_axle, car->wheels[0].angular_velocity, car->wheels[1].angular_velocity, &TfL, &TfR);
+      lcc_lsd_split(&car->differential, T_axle, car->wheels[2].angular_velocity, car->wheels[3].angular_velocity, &TrL, &TrR);
+      break;
+    }
+    default:
+      break;
   }
   /* apply shit */
   car->wheels[0].drive_torque = TfL;
@@ -670,6 +681,7 @@ void lcc_car_update(lcc_car_t *car, float dt) {
   if(dt <= 0.0f) return;
   car->timestep = dt;
   car->simulation_time += dt;
+
   /* steering: equal front steer (TODO: mabye look at ackermann steergin later) */
   float max_sa               = 40.0f * (LCC_PI / 180.0f);
   float sa                   = -lcc_clamp(car->steering_input, -1.0f, 1.0f) * max_sa;
@@ -677,17 +689,15 @@ void lcc_car_update(lcc_car_t *car, float dt) {
   car->wheels[1].steer_angle = sa;
   car->wheels[2].steer_angle = 0.0f;
   car->wheels[3].steer_angle = 0.0f;
+
   /* throttle filter */
   float tau             = fmaxf(car->engine.response_time, 1e-3f);
   float k               = 1.0f - expf(-dt / tau);
   float target_throttle = lcc_clamp(car->throttle_input, 0.0f, 1.0f);
   car->engine.throttle  = lcc_lerp(car->engine.throttle, target_throttle, k);
-
   lcc_engine_physics(car);
   lcc_transmission_physics(car);
-
   for(int i = 0; i < 4; ++i) lcc_tire_step(car, i);
-  /* integrate vehicle */
   lcc_vehicle_step(car);
 }
 
@@ -784,7 +794,7 @@ lcc_car_t lcc_car_create(lcc_preset_t preset) {
   car.transmission.reverse_ratio  = 3.2f;
   car.transmission.efficiency     = 0.92f;
   car.transmission.current_gear   = 0;
-  car.transmission.drive_type     = 0; /* RWD default */
+  car.transmission.drive_type     = LCC_DRIVE_RWD;
   /* diff */
   car.differential.preload             = 50.0f;
   car.differential.power_factor        = 0.25f;
@@ -813,7 +823,7 @@ lcc_car_t lcc_car_create(lcc_preset_t preset) {
     car.engine.max_torque               = 200.0f;
     car.engine.peak_torque_rpm          = 3000.0f;
     car.engine.peak_power_rpm           = 5800.0f;
-    car.transmission.drive_type         = 1; /* FWD */
+    car.transmission.drive_type         = LCC_DRIVE_FWD;
     car.aerodynamics.drag_coefficient   = 0.32f;
     car.aerodynamics.aero_balance_front = 0.58f;
     break;
@@ -823,7 +833,7 @@ lcc_car_t lcc_car_create(lcc_preset_t preset) {
     car.engine.max_torque             = 350.0f;
     car.engine.peak_torque_rpm        = 3200.0f;
     car.engine.peak_power_rpm         = 6000.0f;
-    car.transmission.drive_type       = 0; /* RWD */
+    car.transmission.drive_type       = LCC_DRIVE_RWD;
     car.aerodynamics.drag_coefficient = 0.29f;
     break;
   case LCC_PRESET_SPORTS:
@@ -860,7 +870,7 @@ lcc_car_t lcc_car_create(lcc_preset_t preset) {
     car.engine.redline_rpm                 = 7100.0f;
     car.engine.peak_torque_rpm             = 3500.0f;
     car.engine.peak_power_rpm              = 6800.0f;
-    car.transmission.drive_type            = 2; /* AWD */
+    car.transmission.drive_type            = LCC_DRIVE_AWD;
     car.aerodynamics.drag_coefficient      = 0.38f;
     car.aerodynamics.downforce_coefficient = 0.25f;
     car.aerodynamics.aero_balance_front    = 0.45f;
