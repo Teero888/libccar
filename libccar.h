@@ -3,8 +3,9 @@
 
   What this does
   --------------
-  - Single-file C99 library (header + implementation) for quick experiments.
+  - Single-file C99 library for quick experiments.
   - u dont deserve to know aka. im lazy. (wip)
+
   License — "Do-What-You-Want (except claim it's yours) License"
   ----------------------------------------------------------------
   Copyright (c) 2025 Teero
@@ -262,15 +263,25 @@ static float lcc_engine_torque_curve(const lcc_engine_t *e, float rpm, float thr
   }
   float thr_shaped = thr * thr * (3.0f - 2.0f * thr);
   float torque_cmd = e->max_torque * t_norm * thr_shaped;
-  /* idle assist */
-  if(rpm_cl < 1.1f * e->idle_rpm) torque_cmd += e->idle_torque * (1.1f - rpm_cl / (1.1f * e->idle_rpm));
   return fmaxf(0.0f, torque_cmd);
 }
 
 static void lcc_engine_physics(lcc_car_t *car) {
   lcc_engine_t *e   = &car->engine;
   float         rpm = lcc_clamp(e->current_rpm, e->stall_rpm, e->redline_rpm);
-  e->output_torque  = lcc_engine_torque_curve(e, rpm, lcc_clamp(e->throttle, 0.0f, 1.0f));
+
+  float throttle_torque = lcc_engine_torque_curve(e, rpm, lcc_clamp(e->throttle, 0.0f, 1.0f));
+
+  float idle_assist = 0.0f;
+  // Apply idle torque only when throttle is off and RPM is near or below idle
+  if(e->throttle < 0.05f && rpm < e->idle_rpm * 1.1f) {
+    // Gently phase in idle torque to prevent stalling
+    float deficit_rpm = (e->idle_rpm * 1.1f) - rpm;
+    float idle_factor = lcc_clamp(deficit_rpm / (e->idle_rpm * 1.1f - e->stall_rpm), 0.0f, 1.0f);
+    idle_assist       = e->idle_torque * idle_factor;
+  }
+
+  e->output_torque = throttle_torque + idle_assist;
 }
 
 /* ---------- differential (simple clutch-type) ---------- */
@@ -320,7 +331,7 @@ static void lcc_transmission_physics(lcc_car_t *car) {
   for(int i = 0; i < 4; ++i) car->wheels[i].drive_torque = 0.0f;
 
   /* ---------------- Gear selection ---------------- */
-  int   g  = t->current_gear; /* -1..num_gears, 0=neutral */
+  int   g  = t->current_gear;
   float gr = 0.0f;
   if(g > 0 && g <= t->num_gears) gr = t->gear_ratios[g - 1];
   else if(g == -1)
@@ -336,7 +347,7 @@ static void lcc_transmission_physics(lcc_car_t *car) {
   if(!isfinite(omega_e)) omega_e = e->idle_rpm * LCC_RAD_PER_RPM;
   float thr = lcc_clamp(e->throttle, 0.0f, 1.0f);
 
-  /* Already computed by lcc_engine_physics this frame */
+  /* This is the total generated torque from lcc_engine_physics */
   float T_out = fmaxf(0.0f, e->output_torque);
 
   /* Losses (oppose rotation) */
@@ -345,14 +356,12 @@ static void lcc_transmission_physics(lcc_car_t *car) {
   float T_resist     = T_resist_mag * lcc_sign(omega_e);
 
   /* ---------------- Clutch engagement ----------------*/
-  /* E: 0 disengaged .. 1 fully engaged */
   float E = 1.0f - lcc_clamp(car->clutch_input, 0.0f, 1.0f);
-  /* If neutral, no final drive, or clutch basically open engine free-runs */
   if(gr == 0.0f || Rf == 0.0f || E < 1e-3f) {
     float Ieng         = fmaxf(e->inertia, 1e-4f);
     float T_net_engine = T_out - T_resist;
     float domega_e     = lcc_clamp((T_net_engine / Ieng) * dt, -5000.0f, 5000.0f);
-    omega_e            = fmaxf(0.0f, omega_e + domega_e); /* allow true stall */
+    omega_e            = fmaxf(0.0f, omega_e + domega_e);
     e->current_rpm     = lcc_clamp(omega_e / LCC_RAD_PER_RPM, 0.0f, e->redline_rpm);
     return;
   }
@@ -375,33 +384,25 @@ static void lcc_transmission_physics(lcc_car_t *car) {
       cnt_w++;
     }
   float avg_w_omega = (cnt_w > 0) ? sum_w / (float)cnt_w : 0.0f;
-  /* gearbox output (propshaft) speed and input (clutch-side) speed */
-  float omega_out  = avg_w_omega * Rf; /* propshaft */
-  float omega_in   = omega_out * gr; /* gearbox input */
-  float omega_diff = omega_e - omega_in;
+  float omega_out   = avg_w_omega * Rf;
+  float omega_in    = omega_out * gr;
+  float omega_diff  = omega_e - omega_in;
 
   /* ---------------- Clutch model ----------------*/
-  /* Capacity and sync */
   float Tcap_base = 50.0f + 1.5f * fmaxf(100.0f, e->max_torque);
-  float T_cap     = Tcap_base * (0.05f + 0.95f * E); /* 0..cap with E */
-  float Ksync     = 0.15f * Tcap_base; /* Nm/(rad/s) */
+  float T_cap     = Tcap_base * (0.05f + 0.95f * E);
+  float Ksync     = 0.15f * Tcap_base;
 
-  /* Remove idle-assist when engaged in gear (prevents unintended creep) */
-  float T_idle     = lcc_engine_torque_curve(e, e->current_rpm, 0.0f);
-  float use_idle   = (g == 0 || E < 0.3f) ? 1.0f : 0.0f;
-  float T_prod_eff = (T_out - T_idle) + use_idle * T_idle;
-
-  /* Desired clutch torque = feed-forward engine drive + slip sync */
   float T_sync  = Ksync * omega_diff;
-  float T_c_pre = T_prod_eff + T_sync;
+  float T_c_pre = T_out + T_sync;
 
-  /* no forward drive with closed throttle and engaged clutch */
-  if(thr < 0.02f && g != 0 && E > 0.7f) T_c_pre = fminf(T_c_pre, 0.0f);
-  float T_c = lcc_clamp(T_c_pre, -T_cap, T_cap); /* engine -> gearbox input */
+  /* Prevent forward drive with closed throttle and engaged clutch (engine braking) */
+  if(thr < 0.02f && g != 0 && E > 0.7f && omega_in > omega_e) T_c_pre = fminf(T_c_pre, 0.0f);
+  float T_c = lcc_clamp(T_c_pre, -T_cap, T_cap);
 
   /* ---------------- Torque to wheels ---------------- */
-  float T_prop         = T_c * gr * eff; /* gearbox output (propshaft) */
-  float T_wheels_total = T_prop * Rf; /* sum torque at driven hubs */
+  float T_prop         = T_c * gr * eff;
+  float T_wheels_total = T_prop * Rf;
   float TfL = 0, TfR = 0, TrL = 0, TrR = 0;
   switch(t->drive_type) {
   case LCC_DRIVE_RWD:
@@ -418,7 +419,6 @@ static void lcc_transmission_physics(lcc_car_t *car) {
   }
   default: break;
   }
-  /* apply shit */
   car->wheels[0].drive_torque = TfL;
   car->wheels[1].drive_torque = TfR;
   car->wheels[2].drive_torque = TrL;
@@ -426,10 +426,10 @@ static void lcc_transmission_physics(lcc_car_t *car) {
 
   /* ---------------- Engine integration ---------------- */
   float Ieng         = fmaxf(e->inertia, 1e-4f);
-  float T_net_engine = T_prod_eff - T_resist - T_c; /* reaction from clutch is -T_c */
+  float T_net_engine = T_out - T_resist - T_c;
   if(e->current_rpm >= e->redline_rpm && T_net_engine > 0.0f) T_net_engine = 0.0f;
   float domega_e = lcc_clamp((T_net_engine / Ieng) * dt, -5000.0f, 5000.0f);
-  omega_e        = fmaxf(0.0f, omega_e + domega_e); /* allow true stall */
+  omega_e        = fmaxf(0.0f, omega_e + domega_e);
   e->current_rpm = lcc_clamp(omega_e / LCC_RAD_PER_RPM, 0.0f, e->redline_rpm);
 }
 
@@ -581,9 +581,15 @@ static void lcc_tire_step(lcc_car_t *car, int i) {
   float T_net     = w->drive_torque + T_contact - T_brake;
   float domega    = (T_net / Iw) * car->timestep;
 
-  /* limit absurd changes to avoid blowups */
   domega = lcc_clamp(domega, -500.0f, 500.0f);
   w->angular_velocity += domega;
+
+  /* lock wheels when braking at low speeds */
+  if(car->brake_input > 0.1f && fabsf(w->angular_velocity) < 0.5f) {
+    float static_torques = w->drive_torque + T_contact;
+    if(fabsf(static_torques) < w->brake_torque) w->angular_velocity = 0.0f;
+  }
+
   /* outputs */
   w->Fx = Fx;
   w->Fy = Fy;
@@ -612,10 +618,8 @@ static void lcc_vehicle_step(lcc_car_t *car) {
     float              Fyw = w->Fx * sw + w->Fy * cw;
     Fw[0] += Fxw;
     Fw[1] += Fyw;
-    /* moment about CG: convert to body then moment arm in body */
     float Fb[2];
     lcc_world_to_body(cx, sx, (float[2]){ Fxw, Fyw }, Fb);
-    /* wheel arm in body */
     float rb[2] = { w->position[0], w->position[1] };
     Mz += rb[0] * Fb[1] - rb[1] * Fb[0];
   }
@@ -634,17 +638,11 @@ static void lcc_vehicle_step(lcc_car_t *car) {
   float yaw_acc = Mz / fmaxf(car->inertia, 1e-3f);
   car->angular_velocity += yaw_acc * car->timestep;
   car->angle += car->angular_velocity * car->timestep;
+
   /* wrap angle */
   if(car->angle > LCC_PI) car->angle -= 2.0f * LCC_PI;
   if(car->angle < -LCC_PI) car->angle += 2.0f * LCC_PI;
-  /* low-speed stickiness to avoid endless tiny creeping when braking TODO: remove this actually, find a way to fix things properly*/
-  float vmag = lcc_length((float *)car->velocity);
-  if(vmag < 0.05f && car->brake_input > 0.5f) {
-    car->velocity[0] = car->velocity[1] = 0.0f;
-    if(fabsf(car->angular_velocity) < 0.05f) car->angular_velocity = 0.0f;
-    for(int i = 0; i < 4; ++i)
-      if(fabsf(car->wheels[i].angular_velocity) < 0.2f) car->wheels[i].angular_velocity = 0.0f;
-  }
+
   /* compute body accelerations for next-step load transfer */
   float Vb[2];
   lcc_world_to_body(cx, sx, (float[2]){ ax, ay }, Vb);
@@ -756,7 +754,7 @@ lcc_car_t lcc_car_create(lcc_preset_t preset) {
     tp->peak_friction       = 1.25f;
     tp->slip_friction       = 0.85f;
     tp->stiffness           = 90000.0f;
-    tp->cornering_stiffness = 120000.0f;
+    tp->cornering_stiffness = 12000.0f;
     tp->camber_stiffness    = 30000.0f;
     tp->rolling_resistance  = 0.013f;
     tp->temperature         = car.ambient_temp;
@@ -773,7 +771,8 @@ lcc_car_t lcc_car_create(lcc_preset_t preset) {
     w->drive_torque         = 0.0f;
     w->brake_torque         = 0.0f;
   }
-  /* wheel positions (body frame) */
+
+  /* wheel positions */
   car.wheels[0].position[0] = +car.wheelbase * 0.5f;
   car.wheels[0].position[1] = +car.track_width * 0.5f; /* FL */
   car.wheels[1].position[0] = +car.wheelbase * 0.5f;
@@ -782,6 +781,7 @@ lcc_car_t lcc_car_create(lcc_preset_t preset) {
   car.wheels[2].position[1] = +car.track_width * 0.5f; /* RL */
   car.wheels[3].position[0] = -car.wheelbase * 0.5f;
   car.wheels[3].position[1] = -car.track_width * 0.5f; /* RR */
+
   /* engine */
   car.engine.max_power          = 200000.0f;
   car.engine.max_torque         = 400.0f;
@@ -800,6 +800,7 @@ lcc_car_t lcc_car_create(lcc_preset_t preset) {
   car.engine.friction_quadratic = 5e-4f;
   car.engine.idle_torque        = 30.0f;
   car.engine.stall_rpm          = 600.0f;
+
   /* gearbox */
   car.transmission.num_gears      = 6;
   car.transmission.gear_ratios[0] = 3.50f;
@@ -813,12 +814,14 @@ lcc_car_t lcc_car_create(lcc_preset_t preset) {
   car.transmission.efficiency     = 0.92f;
   car.transmission.current_gear   = 0;
   car.transmission.drive_type     = LCC_DRIVE_RWD;
+
   /* diff */
   car.differential.preload             = 50.0f;
   car.differential.power_factor        = 0.25f;
   car.differential.coast_factor        = 0.20f;
   car.differential.viscous_coefficient = 5.0f;
   car.differential.bias_limit          = 600.0f;
+
   /* aero */
   car.aerodynamics.drag_coefficient      = 0.30f;
   car.aerodynamics.frontal_area          = 2.0f;
@@ -826,13 +829,16 @@ lcc_car_t lcc_car_create(lcc_preset_t preset) {
   car.aerodynamics.downforce_area        = 2.0f;
   car.aerodynamics.lift_coefficient      = 0.0f;
   car.aerodynamics.aero_balance_front    = 0.55f;
+
   /* suspension (used for load transfer distribution if extended later) */
   car.suspension.stiffness     = 30000.0f;
   car.suspension.damping       = 2.0f * 0.8f * sqrtf(car.suspension.stiffness * (0.25f * 0.9f * car.mass));
   car.suspension.travel        = 0.12f;
   car.suspension.anti_roll_bar = 12000.0f;
+
   /* inertia (approx rectangle) */
   car.inertia = car.mass * (car.wheelbase * car.wheelbase + car.track_width * car.track_width) / 12.0f;
+
   /* presets */
   switch(preset) {
   case LCC_PRESET_ECONOMY:

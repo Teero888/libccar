@@ -588,7 +588,7 @@ impl App {
 
         self.accumulator += dt;
         while self.accumulator >= self.fixed_dt {
-            self.fixed_update(dt);
+            self.fixed_update(self.fixed_dt);
             self.accumulator -= self.fixed_dt;
         }
 
