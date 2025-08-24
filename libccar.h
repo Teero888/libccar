@@ -184,7 +184,8 @@ typedef struct {
 } lcc_car_t;
 
 /* api */
-lcc_car_t   lcc_car_create(lcc_preset_t preset);
+lcc_car_t lcc_car_create(lcc_preset_t preset);
+/* does nothing right now but might be used in the future? */
 void        lcc_car_destroy(lcc_car_t *car);
 void        lcc_car_set_inputs(lcc_car_t *car, float throttle, float brake, float steering, float clutch);
 void        lcc_car_update(lcc_car_t *car, float dt);
@@ -196,7 +197,6 @@ float       lcc_car_get_engine_rpm(const lcc_car_t *car);
 const char *lcc_get_version(void);
 
 /* implementation */
-#define LIBCCAR_IMPLEMENTATION
 #ifdef LIBCCAR_IMPLEMENTATION
 /* math helpers */
 static float lcc_clamp(float v, float lo, float hi) {
