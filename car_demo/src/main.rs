@@ -396,15 +396,15 @@ impl App {
             (false, true) => 1.0,
             _ => 0.0,
         };
-        self.input.steer = lerp(self.input.steer, target_steer, 0.2);
+        self.input.steer = lerp(self.input.steer, target_steer, 0.1);
 
         let throttle_down = input.key_down(egui::Key::K);
         let target_throttle = if throttle_down { 1.0 } else { 0.0 };
-        self.input.throttle = smooth_approach(self.input.throttle, target_throttle, 0.12, 0.2);
+        self.input.throttle = smooth_approach(self.input.throttle, target_throttle, 0.02, 0.02);
 
         let brake_down = input.key_down(egui::Key::J);
         let target_brake = if brake_down { 1.0 } else { 0.0 };
-        self.input.brake = smooth_approach(self.input.brake, target_brake, 0.2, 0.3);
+        self.input.brake = smooth_approach(self.input.brake, target_brake, 0.02, 0.02);
 
         let clutch_down = input.key_down(egui::Key::H);
         let target_clutch = if clutch_down { 1.0 } else { 0.0 };
@@ -1019,7 +1019,7 @@ impl eframe::App for App {
             });
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(Color32::from_rgb(10, 12, 18)))
+            .frame(egui::Frame::none().fill(Color32::from_gray(30)))
             .show(ctx, |ui| {
                 self.draw_world(ui);
                 self.draw_hud(ui);
@@ -1039,8 +1039,8 @@ fn smooth_approach(v: f32, target: f32, rise: f32, fall: f32) -> f32 {
 }
 
 fn draw_grid(painter: &Painter, rect: Rect, cam: Vec2, zoom: f32) {
-    let grid_color = Color32::from_gray(40);
-    let bold_color = Color32::from_gray(60);
+    let grid_color = Color32::from_gray(50);
+    let bold_color = Color32::from_gray(100);
     let step_world = 1.0;
     let step = step_world * zoom;
 

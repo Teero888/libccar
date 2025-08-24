@@ -150,14 +150,6 @@ typedef struct {
   float aero_balance_front; /* 0..1 fraction of DF on front axle */
 } lcc_aerodynamics_t;
 
-typedef struct {
-  /* single-axle parameters. symmetric L/R */
-  float stiffness; /* N/m (corner spring rate equiv) */
-  float damping; /* N*s/m (corner damping equiv) */
-  float travel; /* m total */
-  float anti_roll_bar; /* N/m effective (per axle sum), used for LLT distribution */
-} lcc_suspension_t;
-
 /* ------------------------ Vehicle ------------------------ */
 typedef struct {
   float              mass; /* kg */
@@ -174,7 +166,6 @@ typedef struct {
   lcc_transmission_t transmission;
   lcc_differential_t differential;
   lcc_aerodynamics_t aerodynamics;
-  lcc_suspension_t   suspension;
   lcc_tire_params_t  tire_params[4];
   lcc_wheel_state_t  wheels[4];
 
@@ -830,76 +821,366 @@ lcc_car_t lcc_car_create(lcc_preset_t preset) {
   car.aerodynamics.lift_coefficient      = 0.0f;
   car.aerodynamics.aero_balance_front    = 0.55f;
 
-  /* suspension (used for load transfer distribution if extended later) */
-  car.suspension.stiffness     = 30000.0f;
-  car.suspension.damping       = 2.0f * 0.8f * sqrtf(car.suspension.stiffness * (0.25f * 0.9f * car.mass));
-  car.suspension.travel        = 0.12f;
-  car.suspension.anti_roll_bar = 12000.0f;
-
-  /* inertia (approx rectangle) */
+  /* inertia */
   car.inertia = car.mass * (car.wheelbase * car.wheelbase + car.track_width * car.track_width) / 12.0f;
 
-  /* presets */
+  /* presets. values taken from gpt-5-high */
   switch(preset) {
-  case LCC_PRESET_ECONOMY:
-    car.mass                            = 1350.0f;
-    car.engine.max_power                = 110000.0f;
-    car.engine.max_torque               = 200.0f;
-    car.engine.peak_torque_rpm          = 3000.0f;
-    car.engine.peak_power_rpm           = 5800.0f;
-    car.transmission.drive_type         = LCC_DRIVE_FWD;
-    car.aerodynamics.drag_coefficient   = 0.32f;
-    car.aerodynamics.aero_balance_front = 0.58f;
-    break;
-  case LCC_PRESET_MIDSIZE:
-    car.mass                          = 1600.0f;
-    car.engine.max_power              = 190000.0f;
-    car.engine.max_torque             = 350.0f;
-    car.engine.peak_torque_rpm        = 3200.0f;
-    car.engine.peak_power_rpm         = 6000.0f;
-    car.transmission.drive_type       = LCC_DRIVE_RWD;
-    car.aerodynamics.drag_coefficient = 0.29f;
-    break;
-  case LCC_PRESET_SPORTS:
-    car.mass                               = 1450.0f;
-    car.engine.max_power                   = 350000.0f;
-    car.engine.max_torque                  = 500.0f;
-    car.engine.max_rpm                     = 7000.0f;
-    car.engine.redline_rpm                 = 7500.0f;
-    car.engine.peak_torque_rpm             = 4500.0f;
-    car.engine.peak_power_rpm              = 7000.0f;
+  case LCC_PRESET_ECONOMY: { /* 2018 Honda Civic 1.5T */
+    car.mass        = 1270.0f;
+    car.wheelbase   = 2.70f;
+    car.track_width = 1.56f;
+    car.cg_height   = 0.52f;
+    car.cg_position = 0.42f;
+
+    car.engine.max_power          = 127000.0f;
+    car.engine.max_torque         = 220.0f;
+    car.engine.idle_rpm           = 750.0f;
+    car.engine.max_rpm            = 6500.0f;
+    car.engine.redline_rpm        = 6700.0f;
+    car.engine.peak_torque_rpm    = 2000.0f;
+    car.engine.peak_power_rpm     = 5600.0f;
+    car.engine.inertia            = 0.18f;
+    car.engine.response_time      = 0.12f;
+    car.engine.friction           = 0.040f;
+    car.engine.friction_quadratic = 3.0e-4f;
+    car.engine.engine_brake_coeff = 0.060f;
+    car.engine.idle_torque        = 25.0f;
+    car.engine.stall_rpm          = 550.0f;
+
+    car.transmission.num_gears      = 6;
+    car.transmission.gear_ratios[0] = 3.64f;
+    car.transmission.gear_ratios[1] = 2.08f;
+    car.transmission.gear_ratios[2] = 1.36f;
+    car.transmission.gear_ratios[3] = 1.03f;
+    car.transmission.gear_ratios[4] = 0.86f;
+    car.transmission.gear_ratios[5] = 0.69f;
+    car.transmission.final_drive    = 4.10f;
+    car.transmission.reverse_ratio  = 3.58f;
+    car.transmission.efficiency     = 0.92f;
+    car.transmission.drive_type     = LCC_DRIVE_FWD;
+
+    car.differential.preload             = 0.0f;
+    car.differential.power_factor        = 0.0f;
+    car.differential.coast_factor        = 0.0f;
+    car.differential.viscous_coefficient = 2.0f;
+    car.differential.bias_limit          = 0.0f;
+
+    car.aerodynamics.drag_coefficient      = 0.27f;
+    car.aerodynamics.frontal_area          = 2.20f;
+    car.aerodynamics.downforce_coefficient = 0.00f;
+    car.aerodynamics.downforce_area        = 2.20f;
+    car.aerodynamics.aero_balance_front    = 0.60f;
+
+    car.front_brake_bias = 0.67f;
+    car.max_brake_torque = 6000.0f;
+
+    for(int i = 0; i < 4; ++i) {
+      lcc_tire_params_t *tp            = &car.tire_params[i];
+      tp->width                        = 0.215f;
+      tp->aspect_ratio                 = 0.55f;
+      tp->radius                       = 0.315f;
+      tp->pressure                     = 230.0f;
+      tp->nominal_load                 = car.mass * LCC_GRAVITY / 4.0f;
+      tp->peak_friction                = 1.05f;
+      tp->slip_friction                = 0.90f;
+      tp->stiffness                    = 75000.0f;
+      tp->cornering_stiffness          = 50000.0f;
+      tp->camber_stiffness             = 18000.0f;
+      tp->rolling_resistance           = 0.011f;
+      tp->relax_length_long            = 0.30f;
+      tp->relax_length_lat             = 0.55f;
+      tp->load_sensitivity             = 0.25f;
+      tp->mu_min                       = 0.75f;
+      tp->mu_max                       = 1.15f;
+      car.wheels[i].rotational_inertia = 1.00f;
+    }
+  } break;
+
+  case LCC_PRESET_MIDSIZE: { /* Camry 2.5 */
+    car.mass        = 1550.0f;
+    car.wheelbase   = 2.82f;
+    car.track_width = 1.595f;
+    car.cg_height   = 0.52f;
+    car.cg_position = 0.44f;
+
+    car.engine.max_power          = 151000.0f;
+    car.engine.max_torque         = 250.0f;
+    car.engine.idle_rpm           = 680.0f;
+    car.engine.max_rpm            = 6600.0f;
+    car.engine.redline_rpm        = 6800.0f;
+    car.engine.peak_torque_rpm    = 4100.0f;
+    car.engine.peak_power_rpm     = 6600.0f;
+    car.engine.inertia            = 0.20f;
+    car.engine.response_time      = 0.12f;
+    car.engine.friction           = 0.050f;
+    car.engine.friction_quadratic = 3.0e-4f;
+    car.engine.engine_brake_coeff = 0.070f;
+    car.engine.idle_torque        = 26.0f;
+    car.engine.stall_rpm          = 550.0f;
+
+    car.transmission.num_gears      = 6;
+    car.transmission.gear_ratios[0] = 3.54f;
+    car.transmission.gear_ratios[1] = 2.05f;
+    car.transmission.gear_ratios[2] = 1.39f;
+    car.transmission.gear_ratios[3] = 1.00f;
+    car.transmission.gear_ratios[4] = 0.73f;
+    car.transmission.gear_ratios[5] = 0.59f;
+    car.transmission.final_drive    = 3.36f;
+    car.transmission.reverse_ratio  = 3.16f;
+    car.transmission.efficiency     = 0.92f;
+    car.transmission.drive_type     = LCC_DRIVE_FWD;
+
+    car.differential.preload             = 0.0f;
+    car.differential.power_factor        = 0.0f;
+    car.differential.coast_factor        = 0.0f;
+    car.differential.viscous_coefficient = 3.0f;
+    car.differential.bias_limit          = 0.0f;
+
     car.aerodynamics.drag_coefficient      = 0.28f;
-    car.aerodynamics.downforce_coefficient = 0.20f;
+    car.aerodynamics.frontal_area          = 2.25f;
+    car.aerodynamics.downforce_coefficient = 0.00f;
+    car.aerodynamics.downforce_area        = 2.25f;
+    car.aerodynamics.aero_balance_front    = 0.58f;
+
+    car.front_brake_bias = 0.65f;
+    car.max_brake_torque = 8000.0f;
+
+    for(int i = 0; i < 4; ++i) {
+      lcc_tire_params_t *tp            = &car.tire_params[i];
+      tp->width                        = 0.225f;
+      tp->aspect_ratio                 = 0.50f;
+      tp->radius                       = 0.330f;
+      tp->pressure                     = 230.0f;
+      tp->nominal_load                 = car.mass * LCC_GRAVITY / 4.0f;
+      tp->peak_friction                = 1.05f;
+      tp->slip_friction                = 0.90f;
+      tp->stiffness                    = 80000.0f;
+      tp->cornering_stiffness          = 55000.0f;
+      tp->camber_stiffness             = 20000.0f;
+      tp->rolling_resistance           = 0.0105f;
+      tp->relax_length_long            = 0.32f;
+      tp->relax_length_lat             = 0.55f;
+      tp->load_sensitivity             = 0.25f;
+      tp->mu_min                       = 0.75f;
+      tp->mu_max                       = 1.20f;
+      car.wheels[i].rotational_inertia = 1.05f;
+    }
+  } break;
+
+  case LCC_PRESET_SPORTS: { /* BMW M3 (F80) */
+    car.mass        = 1575.0f;
+    car.wheelbase   = 2.81f;
+    car.track_width = 1.58f;
+    car.cg_height   = 0.35f;
+    car.cg_position = 0.47f;
+
+    car.engine.max_power          = 317000.0f;
+    car.engine.max_torque         = 550.0f;
+    car.engine.idle_rpm           = 800.0f;
+    car.engine.max_rpm            = 7500.0f;
+    car.engine.redline_rpm        = 7600.0f;
+    car.engine.peak_torque_rpm    = 3000.0f;
+    car.engine.peak_power_rpm     = 7300.0f;
+    car.engine.inertia            = 0.23f;
+    car.engine.response_time      = 0.09f;
+    car.engine.friction           = 0.060f;
+    car.engine.friction_quadratic = 5.5e-4f;
+    car.engine.engine_brake_coeff = 0.10f;
+    car.engine.idle_torque        = 30.0f;
+    car.engine.stall_rpm          = 650.0f;
+
+    car.transmission.num_gears      = 6;
+    car.transmission.gear_ratios[0] = 4.11f;
+    car.transmission.gear_ratios[1] = 2.32f;
+    car.transmission.gear_ratios[2] = 1.54f;
+    car.transmission.gear_ratios[3] = 1.18f;
+    car.transmission.gear_ratios[4] = 1.00f;
+    car.transmission.gear_ratios[5] = 0.85f;
+    car.transmission.final_drive    = 3.46f;
+    car.transmission.reverse_ratio  = 3.68f;
+    car.transmission.efficiency     = 0.92f;
+    car.transmission.drive_type     = LCC_DRIVE_RWD;
+
+    car.differential.preload             = 80.0f;
+    car.differential.power_factor        = 0.35f;
+    car.differential.coast_factor        = 0.25f;
+    car.differential.viscous_coefficient = 5.0f;
+    car.differential.bias_limit          = 1200.0f;
+
+    car.aerodynamics.drag_coefficient      = 0.34f;
+    car.aerodynamics.frontal_area          = 2.20f;
+    car.aerodynamics.downforce_coefficient = 0.03f;
+    car.aerodynamics.downforce_area        = 2.20f;
     car.aerodynamics.aero_balance_front    = 0.52f;
-    car.suspension.stiffness               = 40000.0f;
-    break;
-  case LCC_PRESET_SUPERCAR:
-    car.mass                               = 1400.0f;
-    car.engine.max_power                   = 530000.0f;
-    car.engine.max_torque                  = 700.0f;
-    car.engine.max_rpm                     = 7500.0f;
-    car.engine.redline_rpm                 = 8000.0f;
-    car.engine.peak_torque_rpm             = 5000.0f;
-    car.engine.peak_power_rpm              = 7600.0f;
-    car.aerodynamics.drag_coefficient      = 0.32f;
-    car.aerodynamics.downforce_coefficient = 0.35f;
-    car.aerodynamics.aero_balance_front    = 0.48f;
-    car.suspension.stiffness               = 50000.0f;
-    break;
-  case LCC_PRESET_HYPERCAR:
-    car.mass                               = 1950.0f;
-    car.engine.max_power                   = 1100000.0f;
-    car.engine.max_torque                  = 1200.0f;
-    car.engine.max_rpm                     = 6700.0f;
-    car.engine.redline_rpm                 = 7100.0f;
-    car.engine.peak_torque_rpm             = 3500.0f;
-    car.engine.peak_power_rpm              = 6800.0f;
-    car.transmission.drive_type            = LCC_DRIVE_AWD;
-    car.aerodynamics.drag_coefficient      = 0.38f;
+
+    car.front_brake_bias = 0.62f;
+    car.max_brake_torque = 11000.0f;
+
+    for(int i = 0; i < 4; ++i) {
+      lcc_tire_params_t *tp            = &car.tire_params[i];
+      tp->width                        = 0.265f;
+      tp->aspect_ratio                 = 0.35f;
+      tp->radius                       = 0.330f;
+      tp->pressure                     = 230.0f;
+      tp->nominal_load                 = car.mass * LCC_GRAVITY / 4.0f;
+      tp->peak_friction                = 1.20f;
+      tp->slip_friction                = 0.95f;
+      tp->stiffness                    = 90000.0f;
+      tp->cornering_stiffness          = 65000.0f;
+      tp->camber_stiffness             = 40000.0f;
+      tp->rolling_resistance           = 0.010f;
+      tp->relax_length_long            = 0.33f;
+      tp->relax_length_lat             = 0.50f;
+      tp->load_sensitivity             = 0.25f;
+      tp->mu_min                       = 0.85f;
+      tp->mu_max                       = 1.35f;
+      car.wheels[i].rotational_inertia = 1.10f;
+    }
+  } break;
+
+  case LCC_PRESET_SUPERCAR: { /* Ferrari 488 GTB-ish */
+    car.mass        = 1475.0f;
+    car.wheelbase   = 2.65f;
+    car.track_width = 1.67f;
+    car.cg_height   = 0.34f;
+    car.cg_position = 0.585f;
+
+    car.engine.max_power          = 492000.0f;
+    car.engine.max_torque         = 760.0f;
+    car.engine.idle_rpm           = 800.0f;
+    car.engine.max_rpm            = 8000.0f;
+    car.engine.redline_rpm        = 8200.0f;
+    car.engine.peak_torque_rpm    = 3000.0f;
+    car.engine.peak_power_rpm     = 8000.0f;
+    car.engine.inertia            = 0.24f;
+    car.engine.response_time      = 0.07f;
+    car.engine.friction           = 0.070f;
+    car.engine.friction_quadratic = 8.0e-4f;
+    car.engine.engine_brake_coeff = 0.12f;
+    car.engine.idle_torque        = 32.0f;
+    car.engine.stall_rpm          = 650.0f;
+
+    car.transmission.num_gears      = 6;
+    car.transmission.gear_ratios[0] = 3.13f;
+    car.transmission.gear_ratios[1] = 2.18f;
+    car.transmission.gear_ratios[2] = 1.56f;
+    car.transmission.gear_ratios[3] = 1.19f;
+    car.transmission.gear_ratios[4] = 0.94f;
+    car.transmission.gear_ratios[5] = 0.76f;
+    car.transmission.final_drive    = 3.54f;
+    car.transmission.reverse_ratio  = 2.90f;
+    car.transmission.efficiency     = 0.92f;
+    car.transmission.drive_type     = LCC_DRIVE_RWD;
+
+    car.differential.preload             = 100.0f;
+    car.differential.power_factor        = 0.40f;
+    car.differential.coast_factor        = 0.30f;
+    car.differential.viscous_coefficient = 6.0f;
+    car.differential.bias_limit          = 1500.0f;
+
+    car.aerodynamics.drag_coefficient      = 0.33f;
+    car.aerodynamics.frontal_area          = 2.00f;
+    car.aerodynamics.downforce_coefficient = 0.30f;
+    car.aerodynamics.downforce_area        = 2.00f;
+    car.aerodynamics.aero_balance_front    = 0.46f;
+
+    car.front_brake_bias = 0.60f;
+    car.max_brake_torque = 14000.0f;
+
+    for(int i = 0; i < 4; ++i) {
+      lcc_tire_params_t *tp            = &car.tire_params[i];
+      tp->width                        = 0.285f;
+      tp->aspect_ratio                 = 0.30f;
+      tp->radius                       = 0.335f;
+      tp->pressure                     = 230.0f;
+      tp->nominal_load                 = car.mass * LCC_GRAVITY / 4.0f;
+      tp->peak_friction                = 1.35f;
+      tp->slip_friction                = 1.05f;
+      tp->stiffness                    = 100000.0f;
+      tp->cornering_stiffness          = 80000.0f;
+      tp->camber_stiffness             = 60000.0f;
+      tp->rolling_resistance           = 0.012f;
+      tp->relax_length_long            = 0.35f;
+      tp->relax_length_lat             = 0.55f;
+      tp->load_sensitivity             = 0.25f;
+      tp->mu_min                       = 0.95f;
+      tp->mu_max                       = 1.55f;
+      car.wheels[i].rotational_inertia = 1.15f;
+    }
+  } break;
+
+  case LCC_PRESET_HYPERCAR: { /* Bugatti Chiron */
+    car.mass        = 1995.0f;
+    car.wheelbase   = 2.71f;
+    car.track_width = 1.66f;
+    car.cg_height   = 0.36f;
+    car.cg_position = 0.56f;
+
+    car.engine.max_power          = 1103000.0f;
+    car.engine.max_torque         = 1600.0f;
+    car.engine.idle_rpm           = 800.0f;
+    car.engine.max_rpm            = 6700.0f;
+    car.engine.redline_rpm        = 6900.0f;
+    car.engine.peak_torque_rpm    = 2000.0f;
+    car.engine.peak_power_rpm     = 6600.0f;
+    car.engine.inertia            = 0.35f;
+    car.engine.response_time      = 0.09f;
+    car.engine.friction           = 0.090f;
+    car.engine.friction_quadratic = 1.1e-3f;
+    car.engine.engine_brake_coeff = 0.14f;
+    car.engine.idle_torque        = 40.0f;
+    car.engine.stall_rpm          = 650.0f;
+
+    car.transmission.num_gears      = 6;
+    car.transmission.gear_ratios[0] = 3.286f;
+    car.transmission.gear_ratios[1] = 2.130f;
+    car.transmission.gear_ratios[2] = 1.556f;
+    car.transmission.gear_ratios[3] = 1.157f;
+    car.transmission.gear_ratios[4] = 0.852f;
+    car.transmission.gear_ratios[5] = 0.628f;
+    car.transmission.final_drive    = 2.80f;
+    car.transmission.reverse_ratio  = 2.90f;
+    car.transmission.efficiency     = 0.92f;
+    car.transmission.drive_type     = LCC_DRIVE_AWD;
+
+    car.differential.preload             = 120.0f;
+    car.differential.power_factor        = 0.30f;
+    car.differential.coast_factor        = 0.25f;
+    car.differential.viscous_coefficient = 8.0f;
+    car.differential.bias_limit          = 1800.0f;
+
+    car.aerodynamics.drag_coefficient      = 0.35f;
+    car.aerodynamics.frontal_area          = 2.07f;
     car.aerodynamics.downforce_coefficient = 0.25f;
+    car.aerodynamics.downforce_area        = 2.00f;
     car.aerodynamics.aero_balance_front    = 0.45f;
-    car.suspension.stiffness               = 60000.0f;
-    break;
+
+    car.front_brake_bias = 0.58f;
+    car.max_brake_torque = 16000.0f;
+
+    for(int i = 0; i < 4; ++i) {
+      lcc_tire_params_t *tp            = &car.tire_params[i];
+      tp->width                        = 0.315f;
+      tp->aspect_ratio                 = 0.30f;
+      tp->radius                       = 0.360f;
+      tp->pressure                     = 230.0f;
+      tp->nominal_load                 = car.mass * LCC_GRAVITY / 4.0f;
+      tp->peak_friction                = 1.25f;
+      tp->slip_friction                = 1.00f;
+      tp->stiffness                    = 110000.0f;
+      tp->cornering_stiffness          = 80000.0f;
+      tp->camber_stiffness             = 65000.0f;
+      tp->rolling_resistance           = 0.011f;
+      tp->relax_length_long            = 0.37f;
+      tp->relax_length_lat             = 0.58f;
+      tp->load_sensitivity             = 0.28f;
+      tp->mu_min                       = 0.90f;
+      tp->mu_max                       = 1.45f;
+      car.wheels[i].rotational_inertia = 1.50f;
+    }
+  } break;
+
   default: break;
   }
   car.inertia = car.mass * (car.wheelbase * car.wheelbase + car.track_width * car.track_width) / 12.0f;
