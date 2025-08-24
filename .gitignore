@@ -1,2 +1,3 @@
 car_demo/target
 car_demo/Cargo.lock
+*.csv

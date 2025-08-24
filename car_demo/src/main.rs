@@ -408,7 +408,7 @@ impl App {
 
         let clutch_down = input.key_down(egui::Key::H);
         let target_clutch = if clutch_down { 1.0 } else { 0.0 };
-        self.input.clutch = smooth_approach(self.input.clutch, target_clutch, 0.3, 0.5);
+        self.input.clutch = smooth_approach(self.input.clutch, target_clutch, 0.02, 0.02);
 
         let w = input.key_pressed(egui::Key::W);
         let s = input.key_pressed(egui::Key::S);

@@ -11,7 +11,7 @@ AlignConsecutiveMacros:
   Enabled:         true
 AlignOperands:   DontAlign
 AlignTrailingComments:
-  Kind:            Never
+  Kind:            Always
 AllowAllArgumentsOnNextLine: false
 AllowAllParametersOfDeclarationOnNextLine: false
 AllowShortBlocksOnASingleLine: Always

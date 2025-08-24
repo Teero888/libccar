@@ -22,15 +22,15 @@ It’s lightweight, easy to integrate, and includes an optional Rust demo for vi
 ```
 Compile:
 ```sh
-gcc -std=c99 my_program.c -o my_program
+cc -std=c99 my_program.c -lm -o my_program
 ```
 ## Building the rust demo
 
 ```sh
 cd libccar/car_demo
-# Linux: gcc --std=c99 -shared -fPIC -o lib/libccar.so ../build_libccar.c
-# macOS: gcc --std=c99 -dynamiclib -o lib/libccar.so ../build_libccar.c
-# Windows: gcc --std=c99 -shared -o lib/libccar.so ../build_libccar.c
+# Linux: cc --std=c99 -shared -fPIC -o lib/libccar.so ../build_libccar.c
+# macOS: cc --std=c99 -dynamiclib -o lib/libccar.so ../build_libccar.c
+# Windows: cc --std=c99 -shared -o lib/libccar.so ../build_libccar.c
 cargo run --release
 ```
 
