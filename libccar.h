@@ -94,6 +94,9 @@ typedef enum {
   LCC_IGNITION_ON, /* starts the car when key is in LCC_KEY_RUN */
 } lcc_ignition_state_t;
 
+/*}}}*/
+
+/* types {{{*/
 /* tire parameters for each wheel */
 typedef struct {
   /* geometry */
@@ -360,6 +363,11 @@ void  lcc_car_set_fuel_level(lcc_car_t *car, float liters);
 
 /* clamp v between [lo,hi] */
 static float lcc_clamp(float v, float lo, float hi) {
+  return v < lo ? lo : (v > hi ? hi : v);
+}
+
+/* clamp v between [lo,hi] */
+static float lcc_iclamp(int v, int lo, int hi) {
   return v < lo ? lo : (v > hi ? hi : v);
 }
 
@@ -1181,14 +1189,14 @@ void lcc_car_shift_up(lcc_car_t *car) {
   if(car->transmission.current_gear < car->transmission.num_gears) car->transmission.current_gear++;
 }
 
-/* shift down one gear (won't go below reverse) */
+/* shift down one gear if possible */
 void lcc_car_shift_down(lcc_car_t *car) {
   if(car->transmission.current_gear > -1) car->transmission.current_gear--;
 }
 
-/* set explicit gear (-1..num_gears) */
+/* set gear (-1..num_gears) */
 void lcc_car_set_gear(lcc_car_t *car, int gear) {
-  if(gear >= -1 && gear <= car->transmission.num_gears) car->transmission.current_gear = gear;
+  car->transmission.current_gear = lcc_iclamp(gear, -1, car->transmission.num_gears);
 }
 
 /* driving inputs (throttle 0..1, brake 0..1, steering -1..1, clutch 0..1) */
@@ -1275,6 +1283,7 @@ void lcc_car_set_fuel_level(lcc_car_t *car, float liters) {
   car->fuel.fuel_level_L = lcc_clamp(liters, 0.0f, car->fuel.tank_capacity_L);
 }
 
+/* starting the car */
 void lcc_car_set_keypos(lcc_car_t *car, lcc_key_state_t key) {
   car->engine.key_pos = key;
 }
