@@ -30,6 +30,7 @@
 #include <float.h>
 #include <math.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -392,10 +393,10 @@ static void lcc_norm2(float v[2]) {
 }
 
 /* transform body->world and world->body using yaw cos/sin */
-static void lcc_body_to_world(float cx, float sx, const float vb[2], float out[2]) {
+/*static void lcc_body_to_world(float cx, float sx, const float vb[2], float out[2]) {
   out[0] = vb[0] * cx - vb[1] * sx;
   out[1] = vb[0] * sx + vb[1] * cx;
-}
+}*/
 
 static void lcc_world_to_body(float cx, float sx, const float vw[2], float out[2]) {
   out[0] = vw[0] * cx + vw[1] * sx;
@@ -470,10 +471,8 @@ static float lcc_electrics_step(lcc_car_t *car, float dt, float engine_rpm, int 
   }
 
   /* starter electrical draw only while START and allowed by lockouts */
-  int   gear            = car->transmission.current_gear;
-  float veh_kph         = lcc_length((float *)car->velocity) * 3.6f;
-  int   starter_allowed = (bat->voltage > bat->min_starter_voltage - 0.5f);
-  int   starter_on      = (e->ignition && key_run && starter_allowed);
+  int starter_allowed = (bat->voltage > bat->min_starter_voltage - 0.5f);
+  int starter_on      = (e->ignition && key_run && starter_allowed);
   if(starter_on) loads += e->starter_power_watts;
 
   /* alternator available electrical power based on alternator rpm */
@@ -486,8 +485,7 @@ static float lcc_electrics_step(lcc_car_t *car, float dt, float engine_rpm, int 
   }
 
   /* estimate load current using OCV (approximation) */
-  float Vbat   = Voc;
-  float I_load = (Vbat > 1.0f) ? (loads / Vbat) : 0.0f;
+  float Vbat = Voc;
 
   /* regulator tries to maintain target voltage and charge low battery */
   float soc_err          = lcc_clamp(1.0f - bat->soc, 0.0f, 1.0f);
@@ -582,9 +580,7 @@ static void lcc_engine_state_update(lcc_car_t *car, float T_net_engine) {
   int fuel_ok       = (car->fuel.fuel_level_L > 0.01f) && (car->fuel.pump_ok);
 
   /* starter lockouts */
-  int   gear            = car->transmission.current_gear;
-  float kph             = lcc_car_get_speed(car);
-  int   starter_allowed = (car->battery.voltage > car->battery.min_starter_voltage);
+  int starter_allowed = (car->battery.voltage > car->battery.min_starter_voltage);
 
   /* START => CRANKING */
   if(e->key_pos == LCC_KEY_RUN && e->ignition && electrical_ok && fuel_ok && starter_allowed) {
@@ -674,8 +670,6 @@ static void lcc_engine_physics(lcc_car_t *car) {
   }
 
   /* starter mechanical torque when START with lockouts respected */
-  int   gear            = car->transmission.current_gear;
-  float kph             = lcc_car_get_speed(car);
   int   starter_allowed = (car->battery.voltage > car->battery.min_starter_voltage);
   float T_starter       = ((e->key_pos == LCC_KEY_RUN && e->ignition) && starter_allowed) ? e->starter_torque : 0.0f;
 
@@ -949,6 +943,9 @@ static void lcc_tire_step(lcc_car_t *car, int i) {
   lcc_wheel_state_t *w  = &car->wheels[i];
   lcc_tire_params_t *tp = &car->tire_params[i];
 
+  const float dt = fmaxf(car->timestep, 1e-6f);
+  const float R  = fmaxf(tp->radius, 0.05f);
+
   /* wheel position in world from body yaw */
   float ca = cosf(car->angle), sa = sinf(car->angle);
   float rWx = w->position[0] * ca - w->position[1] * sa;
@@ -965,20 +962,28 @@ static void lcc_tire_step(lcc_car_t *car, int i) {
   float v_lat  = -vWx * s + vWy * c;
   float v_abs  = sqrtf(v_long * v_long + v_lat * v_lat);
 
-  /* relaxation filters for slip ratio and slip angle */
-  float R         = fmaxf(tp->radius, 0.05f);
-  float vref_long = fmaxf(fabsf(v_long), 0.5f);
-  float kappa_tgt = (w->angular_velocity * R - v_long) / vref_long; /* normalized slip ratio */
+  float omegaR     = w->angular_velocity * R;
+  float v_rel_long = v_long - omegaR; /* slip speed along tire x */
+
+  /* relaxation targets (robust at low speed) */
+  float vref_long = fmaxf(fmaxf(fabsf(v_long), fabsf(omegaR)), 0.1f);
+  float kappa_tgt = (omegaR - v_long) / vref_long;
   kappa_tgt       = lcc_clamp(kappa_tgt, -2.5f, 2.5f);
-  float alpha_tgt = atanf((fabsf(v_long) > 0.2f) ? (v_lat / fabsf(v_long)) : (v_lat / 0.2f));
+
+  float alpha_tgt = atanf(v_lat / fmaxf(fabsf(v_long), 0.2f));
   alpha_tgt       = lcc_clamp(alpha_tgt, -LCC_PI * 0.5f, LCC_PI * 0.5f);
 
   float Lx     = fmaxf(tp->relax_length_long, 0.05f);
   float Ly     = fmaxf(tp->relax_length_lat, 0.05f);
-  float rate_k = fminf(25.0f, vref_long / Lx);
-  float rate_a = fminf(25.0f, v_abs / Ly);
-  w->slip_ratio += (kappa_tgt - w->slip_ratio) * rate_k * car->timestep;
-  w->slip_angle += (alpha_tgt - w->slip_angle) * rate_a * car->timestep;
+  float rate_k = fminf(50.0f, vref_long / Lx);
+  float rate_a = fminf(50.0f, v_abs / Ly);
+
+  /* Slightly faster convergence when braking to avoid the low-speed tail */
+  float T_cap = fmaxf(0.0f, w->brake_torque);
+  if(T_cap > 1e-3f) rate_k = fmaxf(rate_k, 8.0f);
+
+  w->slip_ratio += (kappa_tgt - w->slip_ratio) * rate_k * dt;
+  w->slip_angle += (alpha_tgt - w->slip_angle) * rate_a * dt;
 
   /* effective mu with temperature/wear and load sensitivity */
   float mu_surface = fmaxf(w->surface_friction, 0.1f) * fmaxf(car->surface_friction, 0.1f);
@@ -989,7 +994,10 @@ static void lcc_tire_step(lcc_car_t *car, int i) {
   temp_term       = lcc_clamp(temp_term, 0.5f, 1.05f);
   float wear_term = lcc_clamp(1.0f - 0.6f * tp->wear, 0.4f, 1.0f);
 
-  float mu0 = lcc_lerp(tp->slip_friction, tp->peak_friction, lcc_clamp(temp_term, 0.0f, 1.0f)) * wear_term;
+  /* map temp_term from [0.5..1.05] -> [0..1] before lerp */
+  float t_temp = (temp_term - 0.5f) / (1.05f - 0.5f);
+  t_temp       = lcc_clamp(t_temp, 0.0f, 1.0f);
+  float mu0    = lcc_lerp(tp->slip_friction, tp->peak_friction, t_temp) * wear_term;
 
   float Ls      = lcc_clamp(tp->load_sensitivity, 0.0f, 0.9f);
   float mu_load = mu0 * (1.0f - Ls * (Fz - tp->nominal_load) / fmaxf(tp->nominal_load, 1.0f));
@@ -997,59 +1005,96 @@ static void lcc_tire_step(lcc_car_t *car, int i) {
   float mu      = mu_surface * mu_load;
 
   /* lightweight MF-style force computation */
-  float Dy     = mu * Fz;
-  float Cy     = 1.35f;
-  float By     = tp->cornering_stiffness / fmaxf(Cy * Dy, 1.0f);
-  float Fy_lin = -Dy * sinf(Cy * atanf(By * w->slip_angle)) - tp->camber_stiffness * w->camber_angle;
+  float Fx = 0.0f, Fy = 0.0f;
 
-  float Dx     = mu * Fz;
-  float Cx     = 1.30f;
-  float Bx     = tp->stiffness / fmaxf(Cx * Dx, 1.0f);
-  float Fx_lin = Dx * sinf(Cx * atanf(Bx * w->slip_ratio));
+  if(Fz > 1e-3f) {
+    /* Pure slips */
+    float Dx      = mu * Fz;
+    float Cx      = 1.30f;
+    float Bx      = tp->stiffness / fmaxf(Cx * Dx, 1.0f);
+    float Fx_pure = Dx * sinf(Cx * atanf(Bx * w->slip_ratio));
 
-  /* combined slip scaling (friction ellipse) */
-  float Fx0 = Fx_lin, Fy0 = Fy_lin;
-  float denom = fmaxf(LCC_EPS, sqrtf(Fx0 * Fx0 + Fy0 * Fy0));
-  float scale = fminf(1.0f, mu * Fz / denom);
-  float Fx    = Fx0 * scale;
-  float Fy    = Fy0 * scale;
+    float Dy      = mu * Fz;
+    float Cy      = 1.35f;
+    float By      = tp->cornering_stiffness / fmaxf(Cy * Dy, 1.0f);
+    float Fy_pure = -Dy * sinf(Cy * atanf(By * w->slip_angle)) - tp->camber_stiffness * w->camber_angle;
 
-  /* rolling resistance (direction opposite rolling) */
-  float Crr    = tp->rolling_resistance;
-  float Frr    = Crr * Fz * (vref_long / (vref_long + 5.0f));
-  float rr_dir = (fabsf(v_long) > 1e-3f) ? -lcc_sign(v_long) : -(lcc_sign(w->angular_velocity));
-  Fx += Frr * rr_dir;
+    /* low-speed Coulomb sliding when braking */
+    if(T_cap > 1e-3f) {
+      float mu_k  = 0.97f * mu; /* kinetic friction a bit below peak */
+      float s_rel = fabsf(v_rel_long);
+      /* small hysteresis window for blending */
+      const float s_low  = 0.02f; /* 2 cm/s slip speed => mostly Coulomb */
+      const float s_high = 0.20f; /* >20 cm/s => mostly MF */
+      float       t      = lcc_clamp((s_rel - s_low) / (s_high - s_low), 0.0f, 1.0f);
 
-  /* wheel spin dynamics: drive + contact - brake */
-  float Iw        = fmaxf(w->rotational_inertia, 1e-4f);
-  float omega_abs = fabsf(w->angular_velocity);
+      /* direction resists relative motion; fall back to v_long sign if s_rel0 */
+      float sgn     = (s_rel > 1e-6f) ? lcc_sign(v_rel_long) : lcc_sign(v_long);
+      float Fx_coul = -mu_k * Fz * sgn;
 
-  float eps       = fmaxf(0.02f, car->timestep);
-  float brake_dir = (omega_abs > 0.0f) ? (w->angular_velocity / sqrtf(omega_abs * omega_abs + eps * eps)) : 0.0f;
-  float T_brake   = w->brake_torque * brake_dir;
-  float T_contact = -Fx * R;
-  float T_net     = w->drive_torque + T_contact - T_brake;
-  float domega    = (T_net / Iw) * car->timestep;
-  domega          = lcc_clamp(domega, -500.0f, 500.0f);
-  w->angular_velocity += domega;
+      /* Blend: at tiny slip speeds use Coulomb to produce finite decel */
+      Fx_pure = (1.0f - t) * Fx_coul + t * Fx_pure;
+    }
 
-  /* lock wheel to zero spin if nearly stopped and static torques insufficient */
-  if(car->brake_input > 0.1f && fabsf(w->angular_velocity) < 0.5f) {
-    float static_torques = w->drive_torque + T_contact;
-    if(fabsf(static_torques) < w->brake_torque) w->angular_velocity = 0.0f;
+    /* combined slip scaling (friction ellipse) */
+    float Fmax  = mu * Fz;
+    float mag   = sqrtf(Fx_pure * Fx_pure + Fy_pure * Fy_pure);
+    float scale = (mag > Fmax && mag > 1e-6f) ? (Fmax / mag) : 1.0f;
+
+    Fx = Fx_pure * scale;
+    Fy = Fy_pure * scale;
+
+    /* rolling resistance: oppose wheel-center motion only */
+    float Crr = tp->rolling_resistance;
+    if(Crr > 0.0f && fabsf(v_long) > 1e-3f) {
+      float Frr = Crr * Fz * (fabsf(v_long) / (fabsf(v_long) + 5.0f));
+      Fx -= Frr * lcc_sign(v_long);
+    }
+  } else {
+    /* airborne or nearly unloaded: zero contact forces, bleed slip states */
+    w->slip_ratio *= expf(-5.0f * dt);
+    w->slip_angle *= expf(-5.0f * dt);
   }
 
+  /* wheel spin dynamics: use current-step contact force */
+  float Iw        = fmaxf(w->rotational_inertia, 1e-4f);
+  float T_drive   = w->drive_torque;
+  float T_contact = -Fx * R; /* action of ground on wheel (opposes driving torque) */
+
+  float T_brake;
+  /* how much spin the brake can remove in one step */
+  float domega_cap = (T_cap / Iw) * dt;
+
+  /* static hold if we can stop this step and not exceed capacity */
+  if(fabsf(w->angular_velocity) <= domega_cap && fabsf(T_drive + T_contact) <= T_cap) {
+    T_brake             = -(T_drive + T_contact);
+    w->angular_velocity = 0.0f;
+  } else {
+    /* Dynamic: brake opposes rotor spin */
+    float oppose = (fabsf(w->angular_velocity) > LCC_EPS) ? -lcc_sign(w->angular_velocity) : -lcc_sign(T_drive + T_contact);
+    T_brake      = T_cap * oppose;
+  }
+
+  /* integrate rotor speed */
+  float T_net  = T_drive + T_contact + T_brake;
+  float domega = lcc_clamp((T_net / Iw) * dt, -500.0f, 500.0f);
+  w->angular_velocity += domega;
+
+  /* store forces in wheel frame */
   w->Fx = Fx;
   w->Fy = Fy;
 
   /* simple thermal and wear model driven by slip power */
-  float       slip_power = fabsf(Fx) * (fabsf(w->angular_velocity * R - v_long)) + fabsf(Fy) * fabsf(v_lat);
-  float       v_gate     = v_abs / (v_abs + 1.0f);
-  const float c_heat     = 3.5e-4f; /* K per (N*m/s) */
-  float       k_cool     = 0.04f + 0.012f * lcc_length((float *)car->velocity);
-  float       dTdt       = c_heat * slip_power * v_gate - k_cool * (w->temperature - car->ambient_temp);
-  w->temperature         = lcc_clamp(w->temperature + dTdt * car->timestep, car->ambient_temp, 160.0f);
-  tp->wear               = lcc_clamp(tp->wear + (slip_power * car->timestep) * 1.0e-7f, 0.0f, 1.0f);
+  float slip_speed_long = fabsf(v_rel_long);
+  float slip_speed_lat  = fabsf(v_lat);
+  float slip_power      = fabsf(Fx) * slip_speed_long + fabsf(Fy) * slip_speed_lat;
+
+  float       v_gate = v_abs / (v_abs + 1.0f);
+  const float c_heat = 3.5e-4f; /* K per (N*m/s) */
+  float       k_cool = 0.04f + 0.012f * lcc_length((float *)car->velocity);
+  float       dTdt   = c_heat * slip_power * v_gate - k_cool * (w->temperature - car->ambient_temp);
+  w->temperature     = lcc_clamp(w->temperature + dTdt * dt, car->ambient_temp, 160.0f);
+  tp->wear           = lcc_clamp(tp->wear + (slip_power * dt) * 1.0e-7f, 0.0f, 1.0f);
 }
 
 /*}}}*/

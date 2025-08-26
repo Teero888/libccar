@@ -592,7 +592,7 @@ struct SkidSegment {
 struct Plots {
     rpm: Vec<(f32, f32)>,
     speed: Vec<(f32, f32)>,
-    inputs: [Vec<(f32, f32)>; 4],
+    wheel_omega: [Vec<(f32, f32)>; 4],
     slip_ratios: [Vec<(f32, f32)>; 4],
     yaw_rate: Vec<(f32, f32)>,
     start_time: Instant,
@@ -604,7 +604,7 @@ impl Plots {
         Self {
             rpm: Vec::new(),
             speed: Vec::new(),
-            inputs: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+            wheel_omega: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
             slip_ratios: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
             yaw_rate: Vec::new(),
             start_time: Instant::now(),
@@ -627,7 +627,7 @@ impl Plots {
         self.speed.push((t, speed));
         self.yaw_rate.push((t, yaw_rate));
         for i in 0..4 {
-            self.inputs[i].push((t, inputs[i]));
+            self.wheel_omega[i].push((t, inputs[i]));
             self.slip_ratios[i].push((t, slip_ratios[i]));
             if self.slip_ratios[i].len() > self.max_len {
                 self.slip_ratios[i].remove(0);
@@ -643,8 +643,8 @@ impl Plots {
             self.yaw_rate.remove(0);
         }
         for i in 0..4 {
-            if self.inputs[i].len() > self.max_len {
-                self.inputs[i].remove(0);
+            if self.wheel_omega[i].len() > self.max_len {
+                self.wheel_omega[i].remove(0);
             }
         }
     }
@@ -842,10 +842,10 @@ impl App {
             rpm as f32,
             speed_kmh as f32,
             [
-                self.car.throttle_input,
-                self.car.brake_input,
-                self.car.clutch_input,
-                (self.car.steering_input + 1.0) * 0.5,
+                self.car.wheels[0].angular_velocity,
+                self.car.wheels[1].angular_velocity,
+                self.car.wheels[2].angular_velocity,
+                self.car.wheels[3].angular_velocity,
             ],
             [
                 self.car.wheels[0].slip_ratio as f32,
@@ -1623,7 +1623,6 @@ impl App {
                                     .legend(Legend::default())
                                     .height(half)
                                     .show(ui, |pui| {
-                                        let names = ["Throttle", "Brake", "Clutch", "Steer"];
                                         let colors = [
                                             Color32::from_rgb(100, 220, 100),
                                             Color32::from_rgb(230, 100, 100),
@@ -1632,11 +1631,14 @@ impl App {
                                         ];
                                         for i in 0..4 {
                                             let pts = PlotPoints::from_iter(
-                                                self.plots.inputs[i]
+                                                self.plots.wheel_omega[i]
                                                     .iter()
                                                     .map(|&(x, y)| [x as f64, y as f64]),
                                             );
-                                            pui.line(Line::new(names[i], pts).color(colors[i]));
+                                            pui.line(
+                                                Line::new(format!("W{i} omega"), pts)
+                                                    .color(colors[i]),
+                                            );
                                         }
                                     });
 
@@ -2011,8 +2013,8 @@ unsafe fn draw_wheel_info(
     w: &ffi::lcc_wheel_state_t,
 ) {
     let txt = format!(
-        "{label}  SR {:5.2}  SA {:5.2}  Load {:5.0}N  T {:4.1}°C  μ {:4.2}",
-        w.slip_ratio, w.slip_angle, w.load, w.temperature, w.surface_friction
+        "{label}  SR {:5.2}  SA {:5.2}  w {:5.2} Load {:5.0}N  T {:4.1}°C  μ {:4.2}",
+        w.slip_ratio, w.slip_angle, w.angular_velocity, w.load, w.temperature, w.surface_friction
     );
     painter.text(
         pos,
