@@ -573,6 +573,10 @@ struct App {
     last_wheel_world: [Vec2; 4],
     have_last_wheel_world: bool,
 
+    // Electrics / ignition
+    key_pos_ui: ffi::lcc_key_pos_t, // OFF/ACC/RUN selection (START is momentary)
+    accessory_load_watts: f32,      // user accessories
+
     // Config editor
     config: CarConfig,
 }
@@ -674,6 +678,9 @@ impl App {
             last_wheel_world: [Vec2::ZERO; 4],
             have_last_wheel_world: false,
 
+            key_pos_ui: ffi::lcc_key_pos_t_LCC_KEY_RUN,
+            accessory_load_watts: 0.0,
+
             max_trace_points: 4000,
             path_trace: Vec::new(),
             show_trace: true,
@@ -750,6 +757,17 @@ impl App {
             self.input.steer,
             self.input.clutch,
         );
+        // Ignition key: hold Space = START momentary
+        let space = input.key_down(egui::Key::Space);
+        let desired_key = if space {
+            ffi::lcc_key_pos_t_LCC_KEY_START
+        } else {
+            self.key_pos_ui
+        };
+        ffi::lcc_car_set_keypos(&mut self.car, desired_key);
+
+        // Accessory load to DC bus
+        ffi::lcc_car_set_accessory_load(&mut self.car, self.accessory_load_watts.max(0.0));
     }
 
     unsafe fn fixed_update(&mut self, dt: f32) {
@@ -900,8 +918,10 @@ impl App {
         self.last_tick = now;
 
         dt = (dt * self.sim_speed).clamp(0.0, 0.1);
+
+        self.handle_input(ctx);
+
         if self.paused {
-            self.handle_input(ctx);
             return;
         }
 
@@ -914,8 +934,6 @@ impl App {
         if self.follow_camera {
             self.camera_pos = self.world_pos();
         }
-
-        self.handle_input(ctx);
     }
 
     fn draw_world(&self, ui: &mut egui::Ui) {
@@ -1404,7 +1422,81 @@ impl App {
         ui.separator();
 
         ui.collapsing("Controls", |ui| {
-            ui.monospace("a/d = steer\nw/s = shift\nh = clutch\nj = brake\nk = throttle");
+    ui.monospace("a/d = steer\nw/s = shift\nh = clutch\nj = brake\nk = throttle\nSpace = hold START\n(Ignition OFF/ACC/RUN via UI)");
+});
+        ui.separator();
+        ui.collapsing("Ignition & Electrics", |ui| {
+            // Key selector (OFF/ACC/RUN). START is momentary via Space.
+            ui.horizontal(|ui| {
+                ui.label("Key:");
+                let mut choose = |label: &str, v| {
+                    ui.selectable_value(&mut self.key_pos_ui, v, label);
+                };
+                choose("OFF", ffi::lcc_key_pos_t_LCC_KEY_OFF);
+                choose("ACC", ffi::lcc_key_pos_t_LCC_KEY_ACC);
+                choose("RUN", ffi::lcc_key_pos_t_LCC_KEY_RUN);
+                ui.label("(hold Space = START)");
+            });
+
+            // Accessory load slider (applies every frame)
+            ui.add(
+                egui::Slider::new(&mut self.accessory_load_watts, 0.0..=700.0)
+                    .text("Accessory load (W)"),
+            );
+
+            unsafe {
+                let batt_v = ffi::lcc_car_get_battery_voltage(&self.car);
+                let soc = ffi::lcc_car_get_battery_soc(&self.car);
+                ui.label(format!(
+                    "Battery: {:4.2} V  |  SOC: {:3.0}%",
+                    batt_v,
+                    soc * 100.0
+                ));
+                ui.label(format!(
+                    "Electrical load: {:5.0} W",
+                    self.car.electrical_load_W
+                ));
+                ui.label(format!(
+                    "Alternator out: {:5.0} W",
+                    self.car.alternator_out_W
+                ));
+
+                let eng_state = match self.car.engine.state {
+                    0 => "OFF",
+                    1 => "CRANKING",
+                    2 => "RUNNING",
+                    _ => "?",
+                };
+                let fuelcut = self.car.engine.fuel_cut_active != 0;
+                let sparkcut = self.car.engine.spark_cut_active != 0;
+                ui.label(format!(
+                    "Engine: {} {} {}",
+                    eng_state,
+                    if fuelcut { "[FuelCut]" } else { " " },
+                    if sparkcut { "[SparkCut]" } else { " " },
+                ));
+            }
+        });
+
+        ui.separator();
+        ui.collapsing("Fuel", |ui| unsafe {
+            let cap = ffi::lcc_car_get_fuel_capacity_L(&self.car);
+            let mut lvl = ffi::lcc_car_get_fuel_level_L(&self.car);
+            ui.label(format!("Fuel: {:5.1} / {:5.1} L", lvl, cap));
+            ui.horizontal(|ui| {
+                if ui.button("Refill full").clicked() {
+                    ffi::lcc_car_set_fuel_level(&mut self.car, cap);
+                }
+                if ui.button("+5 L").clicked() {
+                    ffi::lcc_car_refuel(&mut self.car, 5.0);
+                }
+            });
+            if ui
+                .add(egui::Slider::new(&mut lvl, 0.0..=cap).text("Set level (L)"))
+                .changed()
+            {
+                ffi::lcc_car_set_fuel_level(&mut self.car, lvl);
+            }
         });
         ui.separator();
         ui.collapsing("Visuals", |ui| {
@@ -1434,7 +1526,6 @@ impl App {
             );
             ui.add(egui::Slider::new(&mut self.skid_ttl, 1.0..=12.0).text("Skid mark fade (s)"));
         });
-
         ui.separator();
         ui.collapsing("Telemetry", |ui| {
             ui.horizontal(|ui| {
@@ -1635,6 +1726,19 @@ impl App {
                 format!("Gear {}", gtxt),
                 egui::FontId::proportional(18.0),
                 Color32::WHITE,
+            );
+
+            let base2 = Pos2::new(origin.x + 160.0, origin.y + 50.0);
+
+            // Fuel bar: L / capacity
+            let cap = ffi::lcc_car_get_fuel_capacity_L(&self.car);
+            let lvl = ffi::lcc_car_get_fuel_level_L(&self.car);
+            draw_bar(
+                &painter,
+                Pos2::new(base2.x, base2.y + 24.0),
+                "Fuel",
+                (lvl / cap).clamp(0.0, 1.0),
+                Color32::from_rgb(200, 180, 60),
             );
 
             let base = Pos2::new(origin.x + 320.0, origin.y - 80.0);
