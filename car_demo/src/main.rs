@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::{f32::consts::PI, time::Instant};
 
 mod ffi {
-    #![allow(non_camel_case_types, non_snake_case, non_upper_case_globals)]
+    #![allow(non_camel_case_types, non_snake_case, non_upper_case_globals, unused)]
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 }
 
@@ -737,7 +737,7 @@ impl App {
 
         let clutch_down = input.key_down(egui::Key::H);
         let target_clutch = if clutch_down { 1.0 } else { 0.0 };
-        self.input.clutch = smooth_approach(self.input.clutch, target_clutch, 0.02, 0.02);
+        self.input.clutch = smooth_approach(self.input.clutch, target_clutch, 0.05, 0.05);
 
         let w = input.key_pressed(egui::Key::W);
         let s = input.key_pressed(egui::Key::S);
