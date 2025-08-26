@@ -70,25 +70,29 @@ typedef enum {
 
 /* engine state for the state machine */
 typedef enum {
-  LCC_ENGINE_OFF      = 0, /* stopped: no power, no rotation unless back-driven by wheels */
-  LCC_ENGINE_CRANKING = 1, /* starter active: trying to start */
-  LCC_ENGINE_RUNNING  = 2, /* normal operation */
+  LCC_ENGINE_OFF,      /* stopped: no power, no rotation unless back-driven by wheels */
+  LCC_ENGINE_CRANKING, /* starter active: trying to start */
+  LCC_ENGINE_RUNNING,  /* normal operation */
 } lcc_engine_state_t;
 
 /* rev limiter behavior */
 typedef enum {
-  LCC_REV_CUT_FUEL  = 0, /* hard fuel cut */
-  LCC_REV_CUT_SPARK = 1, /* spark cut */
-  LCC_REV_CUT_MIXED = 2, /* fuel cut at hard limit + soft spark cut near redline */
+  LCC_REV_CUT_FUEL,  /* hard fuel cut */
+  LCC_REV_CUT_SPARK, /* spark cut */
+  LCC_REV_CUT_MIXED, /* fuel cut at hard limit + soft spark cut near redline */
 } lcc_rev_limit_mode_t;
 
-/* realistic ignition key positions */
+/* key states */
 typedef enum {
-  LCC_KEY_OFF   = 0, /* battery off-line (no ECU/pump), accessories off */
-  LCC_KEY_ACC   = 1, /* accessories only */
-  LCC_KEY_RUN   = 2, /* ECU and fuel system active (engine can run if already started) */
-  LCC_KEY_START = 3, /* starter engaged while held */
-} lcc_key_pos_t;
+  LCC_KEY_OFF, /* battery off-line (no ECU/pump), accessories off */
+  LCC_KEY_RUN, /* electronics, ECU and fuel system active (engine can run if already started) */
+} lcc_key_state_t;
+
+/* ignition states */
+typedef enum {
+  LCC_IGNITION_OFF,
+  LCC_IGNITION_ON, /* starts the car when key is in LCC_KEY_RUN */
+} lcc_ignition_state_t;
 
 /* tire parameters for each wheel */
 typedef struct {
@@ -165,11 +169,9 @@ typedef struct {
   float min_start_rpm;           /* rpm needed to self-sustain */
 
   /* starter parameters and lockouts */
-  float starter_torque;            /* Nm assisted at crank while START */
-  float starter_power_watts;       /* W electrical draw while START */
-  float starter_efficiency;        /* mech/electrical ratio */
-  float starter_lockout_rpm;       /* rpm above which starter is inhibited */
-  float starter_lockout_speed_kph; /* speed above which starter is inhibited */
+  float starter_torque;      /* Nm assisted at crank while START */
+  float starter_power_watts; /* W electrical draw while START */
+  float starter_efficiency;  /* mech/electrical ratio */
 
   /* idle controller parameters */
   float idle_target_rpm;      /* rpm target for idle */
@@ -180,12 +182,12 @@ typedef struct {
 
   /* compact state/flags (packed to reduce padding) */
   uint8_t state;                  /* lcc_engine_state_t (OFF/CRANKING/RUNNING) */
-  uint8_t key_pos;                /* lcc_key_pos_t (OFF/ACC/RUN/START) */
+  uint8_t key_pos;                /* lcc_key_state_t (OFF/RUN/START) */
+  uint8_t ignition;               /* lcc_ignitions_state_t (OFF/ON) accessed externally */
   uint8_t fuel_cut_active;        /* 0/1 */
   uint8_t spark_cut_active;       /* 0/1 */
   uint8_t decel_fuel_cut_enabled; /* 0/1 */
   uint8_t rev_limiter_mode;       /* lcc_rev_limit_mode_t */
-  uint8_t starter_require_clutch; /* 0/1 require clutch when in gear */
   uint8_t _pad0;                  /* alignment */
 
   /* stall detection */
@@ -333,9 +335,11 @@ float       lcc_car_get_engine_rpm(const lcc_car_t *car); /* rpm */
 const char *lcc_get_version(void);
 
 /* key position and subsystems */
-void          lcc_car_set_keypos(lcc_car_t *car, lcc_key_pos_t key);
-lcc_key_pos_t lcc_car_get_keypos(const lcc_car_t *car);
-int           lcc_car_engine_is_running(const lcc_car_t *car);
+void                 lcc_car_set_keypos(lcc_car_t *car, lcc_key_state_t key);
+void                 lcc_car_set_ignition(lcc_car_t *car, lcc_ignition_state_t ignition);
+lcc_key_state_t      lcc_car_get_keypos(const lcc_car_t *car);
+lcc_ignition_state_t lcc_car_get_ignition(const lcc_car_t *car);
+int                  lcc_car_engine_is_running(const lcc_car_t *car);
 
 /* electrics and fuel getters/setters */
 float lcc_car_get_battery_voltage(const lcc_car_t *car);
@@ -349,6 +353,7 @@ void  lcc_car_set_fuel_level(lcc_car_t *car, float liters);
 /*}}}*/
 
 /* implementation */
+#define LIBCCAR_IMPLEMENTATION
 #ifdef LIBCCAR_IMPLEMENTATION
 
 /* math helper {{{*/
@@ -452,12 +457,10 @@ static float lcc_electrics_step(lcc_car_t *car, float dt, float engine_rpm, int 
   float Voc   = lcc_batt_ocv(bat->soc);
   float loads = fmaxf(0.0f, bat->parasitic_watts); // always-on tiny drain
 
-  int key_acc   = (e->key_pos >= LCC_KEY_ACC);
-  int key_run   = (e->key_pos >= LCC_KEY_RUN);
-  int key_start = (e->key_pos == LCC_KEY_START);
+  uint8_t key_run = (e->key_pos >= LCC_KEY_RUN);
 
-  // accessories only in ACC/RUN
-  if(key_acc) loads += fmaxf(0.0f, bat->accessory_load_watts);
+  // accessories only in RUN
+  if(key_run) loads += fmaxf(0.0f, bat->accessory_load_watts);
 
   // ECU + pump only when RUN and voltage OK
   if(key_run && bat->voltage > bat->min_ignition_voltage) {
@@ -468,9 +471,8 @@ static float lcc_electrics_step(lcc_car_t *car, float dt, float engine_rpm, int 
   /* starter electrical draw only while START and allowed by lockouts */
   int   gear            = car->transmission.current_gear;
   float veh_kph         = lcc_length((float *)car->velocity) * 3.6f;
-  int   starter_allowed = (engine_rpm < e->starter_lockout_rpm) && (veh_kph < e->starter_lockout_speed_kph) &&
-    (bat->voltage > bat->min_starter_voltage - 0.5f) && (!e->starter_require_clutch || (gear == 0) || (car->clutch_input > 0.5f));
-  int starter_on = (key_start && key_run && starter_allowed) ? 1 : 0;
+  int   starter_allowed = (bat->voltage > bat->min_starter_voltage - 0.5f);
+  int   starter_on      = (e->ignition && key_run && starter_allowed);
   if(starter_on) loads += e->starter_power_watts;
 
   /* alternator available electrical power based on alternator rpm */
@@ -581,11 +583,10 @@ static void lcc_engine_state_update(lcc_car_t *car, float T_net_engine) {
   /* starter lockouts */
   int   gear            = car->transmission.current_gear;
   float kph             = lcc_car_get_speed(car);
-  int   starter_allowed = (rpm < e->starter_lockout_rpm) && (kph < e->starter_lockout_speed_kph) &&
-    (car->battery.voltage > car->battery.min_starter_voltage) && (!e->starter_require_clutch || (gear == 0) || (car->clutch_input > 0.5f));
+  int   starter_allowed = (car->battery.voltage > car->battery.min_starter_voltage);
 
   /* START => CRANKING */
-  if(e->key_pos == LCC_KEY_START && electrical_ok && fuel_ok && starter_allowed) {
+  if(e->key_pos == LCC_KEY_RUN && e->ignition && electrical_ok && fuel_ok && starter_allowed) {
     e->state = LCC_ENGINE_CRANKING;
   } else if(e->state == LCC_ENGINE_CRANKING && e->key_pos < LCC_KEY_RUN) {
     /* starter released before start; if stopped, go OFF */
@@ -674,9 +675,8 @@ static void lcc_engine_physics(lcc_car_t *car) {
   /* starter mechanical torque when START with lockouts respected */
   int   gear            = car->transmission.current_gear;
   float kph             = lcc_car_get_speed(car);
-  int   starter_allowed = (rpm < e->starter_lockout_rpm) && (kph < e->starter_lockout_speed_kph) &&
-    (car->battery.voltage > car->battery.min_starter_voltage) && (!e->starter_require_clutch || (gear == 0) || (car->clutch_input > 0.5f));
-  float T_starter = ((e->key_pos == LCC_KEY_START) && starter_allowed) ? e->starter_torque : 0.0f;
+  int   starter_allowed = (car->battery.voltage > car->battery.min_starter_voltage);
+  float T_starter       = ((e->key_pos == LCC_KEY_RUN && e->ignition) && starter_allowed) ? e->starter_torque : 0.0f;
 
   /* mild idle assist near idle to prevent chattering */
   float T_idle_assist = 0.0f;
@@ -1242,17 +1242,6 @@ const char *lcc_get_version(void) {
   return LCC_VERSION;
 }
 
-/* key position */
-void lcc_car_set_keypos(lcc_car_t *car, lcc_key_pos_t key) {
-  uint8_t k = (uint8_t)key;
-  if(k > (uint8_t)LCC_KEY_START) k = (uint8_t)LCC_KEY_OFF;
-  car->engine.key_pos = k;
-}
-
-lcc_key_pos_t lcc_car_get_keypos(const lcc_car_t *car) {
-  return (lcc_key_pos_t)car->engine.key_pos;
-}
-
 int lcc_car_engine_is_running(const lcc_car_t *car) {
   return car->engine.state == LCC_ENGINE_RUNNING;
 }
@@ -1284,6 +1273,22 @@ void lcc_car_refuel(lcc_car_t *car, float liters) {
 
 void lcc_car_set_fuel_level(lcc_car_t *car, float liters) {
   car->fuel.fuel_level_L = lcc_clamp(liters, 0.0f, car->fuel.tank_capacity_L);
+}
+
+void lcc_car_set_keypos(lcc_car_t *car, lcc_key_state_t key) {
+  car->engine.key_pos = key;
+}
+
+void lcc_car_set_ignition(lcc_car_t *car, lcc_ignition_state_t ignition) {
+  car->engine.ignition = ignition;
+}
+
+lcc_key_state_t lcc_car_get_keypos(const lcc_car_t *car) {
+  return (lcc_key_state_t)car->engine.key_pos;
+}
+
+lcc_ignition_state_t lcc_car_get_ignition(const lcc_car_t *car) {
+  return (lcc_ignition_state_t)car->engine.ignition;
 }
 
 /* create a car with a preset and initialize all subsystems */
@@ -1350,7 +1355,7 @@ lcc_car_t lcc_car_create(lcc_preset_t preset) {
   car.engine.inertia            = 0.20f;
   car.engine.friction           = 0.05f;
   car.engine.response_time      = 0.10f;
-  car.engine.current_rpm        = car.engine.idle_rpm;
+  car.engine.current_rpm        = 0.0f;
   car.engine.peak_torque_rpm    = 3500.0f;
   car.engine.peak_power_rpm     = 5800.0f;
   car.engine.engine_brake_coeff = 0.08f;
@@ -1368,13 +1373,10 @@ lcc_car_t lcc_car_create(lcc_preset_t preset) {
   car.engine.rev_limiter_mode        = LCC_REV_CUT_MIXED;
 
   /* starter parameters */
-  car.engine.min_start_rpm             = 300.0f;
-  car.engine.starter_torque            = 80.0f;
-  car.engine.starter_power_watts       = 1800.0f;
-  car.engine.starter_efficiency        = 0.55f;
-  car.engine.starter_lockout_rpm       = 800.0f;
-  car.engine.starter_lockout_speed_kph = 25.0f;
-  car.engine.starter_require_clutch    = 1;
+  car.engine.min_start_rpm       = 300.0f;
+  car.engine.starter_torque      = 80.0f;
+  car.engine.starter_power_watts = 1800.0f;
+  car.engine.starter_efficiency  = 0.55f;
 
   /* idle control */
   car.engine.idle_target_rpm      = car.engine.idle_rpm;

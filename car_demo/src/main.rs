@@ -574,8 +574,8 @@ struct App {
     have_last_wheel_world: bool,
 
     // Electrics / ignition
-    key_pos_ui: ffi::lcc_key_pos_t, // OFF/ACC/RUN selection (START is momentary)
-    accessory_load_watts: f32,      // user accessories
+    key_pos_ui: ffi::lcc_key_state_t, // OFF/RUN selection
+    accessory_load_watts: f32,        // user accessories
 
     // Config editor
     config: CarConfig,
@@ -678,7 +678,7 @@ impl App {
             last_wheel_world: [Vec2::ZERO; 4],
             have_last_wheel_world: false,
 
-            key_pos_ui: ffi::lcc_key_pos_t_LCC_KEY_RUN,
+            key_pos_ui: ffi::lcc_key_state_t_LCC_KEY_OFF,
             accessory_load_watts: 0.0,
 
             max_trace_points: 4000,
@@ -757,14 +757,12 @@ impl App {
             self.input.steer,
             self.input.clutch,
         );
-        // Ignition key: hold Space = START momentary
-        let space = input.key_down(egui::Key::Space);
-        let desired_key = if space {
-            ffi::lcc_key_pos_t_LCC_KEY_START
+        if input.key_down(egui::Key::Space) {
+            ffi::lcc_car_set_ignition(&mut self.car, ffi::lcc_ignition_state_t_LCC_IGNITION_ON);
         } else {
-            self.key_pos_ui
-        };
-        ffi::lcc_car_set_keypos(&mut self.car, desired_key);
+            ffi::lcc_car_set_ignition(&mut self.car, ffi::lcc_ignition_state_t_LCC_IGNITION_OFF);
+        }
+        ffi::lcc_car_set_keypos(&mut self.car, self.key_pos_ui);
 
         // Accessory load to DC bus
         ffi::lcc_car_set_accessory_load(&mut self.car, self.accessory_load_watts.max(0.0));
@@ -1422,19 +1420,18 @@ impl App {
         ui.separator();
 
         ui.collapsing("Controls", |ui| {
-    ui.monospace("a/d = steer\nw/s = shift\nh = clutch\nj = brake\nk = throttle\nSpace = hold START\n(Ignition OFF/ACC/RUN via UI)");
+    ui.monospace("a/d = steer\nw/s = shift\nh = clutch\nj = brake\nk = throttle\nSpace = hold START\n(Ignition OFF/RUN via UI)");
 });
         ui.separator();
         ui.collapsing("Ignition & Electrics", |ui| {
-            // Key selector (OFF/ACC/RUN). START is momentary via Space.
+            // Key selector (OFF/RUN). START is momentary via Space.
             ui.horizontal(|ui| {
                 ui.label("Key:");
                 let mut choose = |label: &str, v| {
                     ui.selectable_value(&mut self.key_pos_ui, v, label);
                 };
-                choose("OFF", ffi::lcc_key_pos_t_LCC_KEY_OFF);
-                choose("ACC", ffi::lcc_key_pos_t_LCC_KEY_ACC);
-                choose("RUN", ffi::lcc_key_pos_t_LCC_KEY_RUN);
+                choose("OFF", ffi::lcc_key_state_t_LCC_KEY_OFF);
+                choose("RUN", ffi::lcc_key_state_t_LCC_KEY_RUN);
                 ui.label("(hold Space = START)");
             });
 
