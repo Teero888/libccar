@@ -13,14 +13,14 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     env:
-      PACKAGE: carclib-${{ matrix.os }}
+      PACKAGE: libccar-${{ matrix.os }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up Rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
           override: true
@@ -31,27 +31,31 @@ jobs:
 
       - name: Install build tools (Windows)
         if: matrix.os == 'windows-latest'
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: ilammy/msvc-dev-cmd@v1.13.0
 
       - name: Build libccar (Linux)
         if: matrix.os == 'ubuntu-latest'
         run: |
           gcc -O2 -std=c99 -fPIC -shared build_libccar.c -o libccar.so -lm
+          mkdir -p car_demo/lib
           cp libccar.so car_demo/lib/
 
       - name: Build libccar (macOS)
         if: matrix.os == 'macos-latest'
         run: |
           clang -O2 -std=c99 -dynamiclib build_libccar.c -o libccar.dylib -lm
+          mkdir -p car_demo/lib
           cp libccar.dylib car_demo/lib/
 
       - name: Build libccar (Windows)
         if: matrix.os == 'windows-latest'
+        shell: cmd
         run: |
           cl /O2 /LD build_libccar.c /Fe:ccar.dll /link /IMPLIB:.\ccar.lib
-          ls -Recurse
-          Copy-Item ccar.dll -Destination car_demo\lib\
-          Copy-Item ccar.lib -Destination car_demo\lib\
+          dir /s
+          mkdir car_demo\lib
+          copy ccar.dll car_demo\lib\
+          copy ccar.lib car_demo\lib\
 
       - name: Build Rust project
         working-directory: car_demo
@@ -60,24 +64,24 @@ jobs:
       - name: Package artifacts (Linux)
         if: matrix.os == 'ubuntu-latest'
         run: |
-          mkdir -p "${PACKAGE}"
-          mv car_demo/target/release/libccar_demo "${PACKAGE}"
-          mv libccar.so "${PACKAGE}"
+          mkdir -p "${{ env.PACKAGE }}"
+          mv car_demo/target/release/libccar_demo "${{ env.PACKAGE }}"
+          mv libccar.so "${{ env.PACKAGE }}"
 
       - name: Package artifacts (macOS)
         if: matrix.os == 'macos-latest'
         run: |
-          mkdir -p "${PACKAGE}"
-          mv car_demo/target/release/libccar_demo "${PACKAGE}"
-          mv libccar.dylib "${PACKAGE}"
+          mkdir -p "${{ env.PACKAGE }}"
+          mv car_demo/target/release/libccar_demo "${{ env.PACKAGE }}"
+          mv libccar.dylib "${{ env.PACKAGE }}"
 
       - name: Package artifacts (Windows)
         if: matrix.os == 'windows-latest'
         run: |
-          New-Item -ItemType Directory -Force -Path $env:PACKAGE
-          Move-Item -Path car_demo/target/release/libccar_demo.exe -Destination $env:PACKAGE
-          Move-Item -Path ccar.dll -Destination $env:PACKAGE
-          Move-Item -Path ccar.lib -Destination $env:PACKAGE
+          mkdir -p "${{ env.PACKAGE }}"
+          mv car_demo/target/release/libccar_demo.exe "${{ env.PACKAGE }}"
+          mv ccar.dll "${{ env.PACKAGE }}"
+          mv ccar.lib "${{ env.PACKAGE }}"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
