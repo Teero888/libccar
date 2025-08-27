@@ -1898,7 +1898,7 @@ unsafe fn draw_wheel(
     let temp = w.temperature;
     let mu = w.surface_friction;
     let color = Color32::from_rgb(
-        (temp.clamp(20.0, 150.0) - 20.0) as u8 * 255 / 130,
+        ((temp.clamp(20.0, 150.0) - 20.0) / 130.0 * 255.0) as u8,
         (mu.clamp(0.3, 1.3) * 200.0) as u8,
         180,
     );
