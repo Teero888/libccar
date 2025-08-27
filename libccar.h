@@ -44,6 +44,12 @@
 
 /*}}}*/
 
+/* LIBCCAR_DEF {{{*/
+#ifndef LIBCCAR_DEF
+#define LIBCCAR_DEF
+#endif
+/*}}}*/
+
 /* enums {{{*/
 
 /* built-in car presets */
@@ -316,41 +322,40 @@ typedef struct {
 /* public api {{{*/
 
 /* construction / destruction */
-lcc_car_t lcc_car_create(lcc_preset_t preset);
-void      lcc_car_destroy(lcc_car_t *car);
+LIBCCAR_DEF lcc_car_t lcc_car_create(lcc_preset_t preset);
+LIBCCAR_DEF void      lcc_car_destroy(lcc_car_t *car);
 
 /* inputs and stepping */
-void lcc_car_set_inputs(lcc_car_t *car, float throttle, float brake, float steering, float clutch);
-void lcc_car_update(lcc_car_t *car, float dt);
+LIBCCAR_DEF void lcc_car_set_inputs(lcc_car_t *car, float throttle, float brake, float steering, float clutch);
+LIBCCAR_DEF void lcc_car_update(lcc_car_t *car, float dt);
 
 /* gearing and info */
-void        lcc_car_shift_up(lcc_car_t *car);
-void        lcc_car_shift_down(lcc_car_t *car);
-void        lcc_car_set_gear(lcc_car_t *car, int gear);
-float       lcc_car_get_speed(const lcc_car_t *car);      /* km/h */
-float       lcc_car_get_engine_rpm(const lcc_car_t *car); /* rpm */
-const char *lcc_get_version(void);
+LIBCCAR_DEF void        lcc_car_shift_up(lcc_car_t *car);
+LIBCCAR_DEF void        lcc_car_shift_down(lcc_car_t *car);
+LIBCCAR_DEF void        lcc_car_set_gear(lcc_car_t *car, int gear);
+LIBCCAR_DEF float       lcc_car_get_speed(const lcc_car_t *car);      /* km/h */
+LIBCCAR_DEF float       lcc_car_get_engine_rpm(const lcc_car_t *car); /* rpm */
+LIBCCAR_DEF const char *lcc_get_version(void);
 
 /* key position and subsystems */
-void                 lcc_car_set_keypos(lcc_car_t *car, lcc_key_state_t key);
-void                 lcc_car_set_ignition(lcc_car_t *car, lcc_ignition_state_t ignition);
-lcc_key_state_t      lcc_car_get_keypos(const lcc_car_t *car);
-lcc_ignition_state_t lcc_car_get_ignition(const lcc_car_t *car);
-int                  lcc_car_engine_is_running(const lcc_car_t *car);
+LIBCCAR_DEF void                 lcc_car_set_keypos(lcc_car_t *car, lcc_key_state_t key);
+LIBCCAR_DEF void                 lcc_car_set_ignition(lcc_car_t *car, lcc_ignition_state_t ignition);
+LIBCCAR_DEF lcc_key_state_t      lcc_car_get_keypos(const lcc_car_t *car);
+LIBCCAR_DEF lcc_ignition_state_t lcc_car_get_ignition(const lcc_car_t *car);
+LIBCCAR_DEF int                  lcc_car_engine_is_running(const lcc_car_t *car);
 
 /* electrics and fuel getters/setters */
-float lcc_car_get_battery_voltage(const lcc_car_t *car);
-float lcc_car_get_battery_soc(const lcc_car_t *car);
-void  lcc_car_set_accessory_load(lcc_car_t *car, float watts);
-float lcc_car_get_fuel_level_L(const lcc_car_t *car);
-float lcc_car_get_fuel_capacity_L(const lcc_car_t *car);
-void  lcc_car_refuel(lcc_car_t *car, float liters);
-void  lcc_car_set_fuel_level(lcc_car_t *car, float liters);
+LIBCCAR_DEF float lcc_car_get_battery_voltage(const lcc_car_t *car);
+LIBCCAR_DEF float lcc_car_get_battery_soc(const lcc_car_t *car);
+LIBCCAR_DEF void  lcc_car_set_accessory_load(lcc_car_t *car, float watts);
+LIBCCAR_DEF float lcc_car_get_fuel_level_L(const lcc_car_t *car);
+LIBCCAR_DEF float lcc_car_get_fuel_capacity_L(const lcc_car_t *car);
+LIBCCAR_DEF void  lcc_car_refuel(lcc_car_t *car, float liters);
+LIBCCAR_DEF void  lcc_car_set_fuel_level(lcc_car_t *car, float liters);
 
 /*}}}*/
 
 /* implementation */
-#define LIBCCAR_IMPLEMENTATION
 #ifdef LIBCCAR_IMPLEMENTATION
 
 /* math helper {{{*/
