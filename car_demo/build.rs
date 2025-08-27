@@ -15,18 +15,29 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", abs.display());
     println!("cargo:rustc-link-lib=dylib={}", link_name);
 
-    // Embed rpath so the binary finds libccar.so at runtime without env vars.
+    // Embed rpath so the binary finds libccar.so at runtime without env vars
     // Absolute path:
     #[cfg(target_os = "linux")]
     {
         println!("cargo:rustc-link-arg=-Wl,-rpath,{}", abs.display());
-        // Dev-friendly relative path: from target/release to project/lib
+        // Dev-friendly relative path: from target/release to project/lib and cwd
         println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../../lib");
+        println!("cargo:rustc-link-arg=-Wl,-rpath,.");
     }
     #[cfg(target_os = "macos")]
     {
         println!("cargo:rustc-link-arg=-Wl,-rpath,{}", abs.display());
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", abs.display());
+        // Dev-friendly relative path: from target/release to project/lib and cwd
         println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/../../lib");
+        println!("cargo:rustc-link-arg=-Wl,-rpath,.");
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // Windows does not have rpath so the so must be in PATH or next to binary
+        // This is just so the compiler sees the .dll
+        println!("cargo:rustc-link-search=native={}", abs.display());
+        println!("cargo:rustc-link-lib=dylib=ccar");
     }
 
     // Bindgen
