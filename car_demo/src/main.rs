@@ -2013,7 +2013,7 @@ unsafe fn draw_wheel_info(
     w: &ffi::lcc_wheel_state_t,
 ) {
     let txt = format!(
-        "{label}  SR {:5.2}  SA {:5.2}  w {:5.2} Load {:5.0}N  T {:4.1}°C  μ {:4.2}",
+        "{label}  SR {:5.2}  SA {:5.2}  w {:8.2} Load {:5.0}N  T {:4.1}°C  μ {:4.2}",
         w.slip_ratio, w.slip_angle, w.angular_velocity, w.load, w.temperature, w.surface_friction
     );
     painter.text(

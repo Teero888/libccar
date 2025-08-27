@@ -457,14 +457,14 @@ static float lcc_electrics_step(lcc_car_t *car, float dt, float engine_rpm, int 
 
   /* base loads at current step */
   float Voc   = lcc_batt_ocv(bat->soc);
-  float loads = fmaxf(0.0f, bat->parasitic_watts); // always-on tiny drain
+  float loads = fmaxf(0.0f, bat->parasitic_watts); /* always-on tiny drain */
 
   uint8_t key_run = (e->key_pos >= LCC_KEY_RUN);
 
-  // accessories only in RUN
+  /* accessories only in RUN */
   if(key_run) loads += fmaxf(0.0f, bat->accessory_load_watts);
 
-  // ECU + pump only when RUN and voltage OK
+  /* ECU + pump only when RUN and voltage OK */
   if(key_run && bat->voltage > bat->min_ignition_voltage) {
     loads += bat->ecu_load_watts;
     if(fu->fuel_level_L > 0.01f) loads += bat->fuel_pump_watts;
@@ -902,11 +902,17 @@ static void lcc_compute_loads(lcc_car_t *car, float ax_body, float ay_body, floa
   float Wf_static = W * (1.0f - car->cg_position);
   float Wr_static = W * car->cg_position;
 
-  /* longitudinal transfer: positive ax shifts to rear */
-  float dF_long = (car->mass * ax_body * car->cg_height) / fmaxf(car->wheelbase, 0.1f);
-
-  /* lateral transfer across track */
+  /* longitudinal and lateral transfer */
+  float dF_long      = (car->mass * ax_body * car->cg_height) / fmaxf(car->wheelbase, 0.1f);
   float dF_lat_total = (car->mass * ay_body * car->cg_height) / fmaxf(car->track_width, 0.1f);
+
+  /* reduce dynamic load transfer when crawling */
+  {
+    float vmag = lcc_length((float *)car->velocity);
+    float gate = lcc_clamp(vmag / 0.8f, 0.0f, 1.0f); /* 0 at rest -> 1 by ~0.8 m/s */
+    dF_long *= gate;
+    dF_lat_total *= gate;
+  }
 
   /* split lateral transfer evenly between axles (simple model) */
   float lambda       = 0.5f;
@@ -978,6 +984,28 @@ static void lcc_tire_step(lcc_car_t *car, int i) {
   float rate_k = fminf(50.0f, vref_long / Lx);
   float rate_a = fminf(50.0f, v_abs / Ly);
 
+  /* keep relaxation from going to zero at low speed */
+  const float rate_min_long = 8.0f; /* s^-1 */
+  const float rate_min_lat  = 8.0f; /* s^-1 */
+  rate_k                    = fmaxf(rate_k, rate_min_long);
+  rate_a                    = fmaxf(rate_a, rate_min_lat);
+  /* extra snap when crawling to avoid phase lag kick */
+  {
+    float s_long2 = fabsf(v_rel_long);
+    float s_lat2  = fabsf(v_lat);
+    float s_max2  = fmaxf(s_long2, s_lat2);
+    if(s_max2 < 0.03f) { /* m/s */
+      rate_k = fmaxf(rate_k, 35.0f);
+      rate_a = fmaxf(rate_a, 35.0f);
+    }
+  }
+  /* bleed residual slip memory when crawling */
+  if(v_abs < 0.25f) {
+    float decay = expf(-12.0f * dt); /* fast-ish decay near rest */
+    w->slip_angle *= decay;
+    w->slip_ratio *= decay;
+  }
+
   /* Slightly faster convergence when braking to avoid the low-speed tail */
   float T_cap = fmaxf(0.0f, w->brake_torque);
   if(T_cap > 1e-3f) rate_k = fmaxf(rate_k, 8.0f);
@@ -1019,27 +1047,60 @@ static void lcc_tire_step(lcc_car_t *car, int i) {
     float By      = tp->cornering_stiffness / fmaxf(Cy * Dy, 1.0f);
     float Fy_pure = -Dy * sinf(Cy * atanf(By * w->slip_angle)) - tp->camber_stiffness * w->camber_angle;
 
-    /* low-speed Coulomb sliding when braking */
-    if(T_cap > 1e-3f) {
-      float mu_k  = 0.97f * mu; /* kinetic friction a bit below peak */
-      float s_rel = fabsf(v_rel_long);
-      /* small hysteresis window for blending */
-      const float s_low  = 0.02f; /* 2 cm/s slip speed => mostly Coulomb */
-      const float s_high = 0.20f; /* >20 cm/s => mostly MF */
-      float       t      = lcc_clamp((s_rel - s_low) / (s_high - s_low), 0.0f, 1.0f);
-
-      /* direction resists relative motion; fall back to v_long sign if s_rel0 */
-      float sgn     = (s_rel > 1e-6f) ? lcc_sign(v_rel_long) : lcc_sign(v_long);
-      float Fx_coul = -mu_k * Fz * sgn;
-
-      /* Blend: at tiny slip speeds use Coulomb to produce finite decel */
-      Fx_pure = (1.0f - t) * Fx_coul + t * Fx_pure;
+    /* lateral Coulomb blend at low lateral slip speeds */
+    {
+      float       s_rel_lat = fabsf(v_lat);
+      const float s_low     = 0.02f; /* <=2 cm/s: mostly Coulomb*/
+      const float s_high    = 0.20f; /* >=20 cm/s: mostly MF*/
+      float       t         = lcc_clamp((s_rel_lat - s_low) / (s_high - s_low), 0.0f, 1.0f);
+      float       mu_k_lat  = 0.95f * mu; /* kinetic < peak*/
+      float       Fy_coul   = -mu_k_lat * Fz * lcc_sign(v_lat);
+      Fy_pure               = (1.0f - t) * Fy_coul + t * Fy_pure;
     }
 
-    /* combined slip scaling (friction ellipse) */
-    float Fmax  = mu * Fz;
-    float mag   = sqrtf(Fx_pure * Fx_pure + Fy_pure * Fy_pure);
-    float scale = (mag > Fmax && mag > 1e-6f) ? (Fmax / mag) : 1.0f;
+    /* static friction  at low slip speeds */
+    /* slip speeds in the contact frame */
+    float s_long = fabsf(v_rel_long);
+    float s_lat  = fabsf(v_lat);
+    float s_max  = fmaxf(s_long, s_lat);
+
+    /* speed scale for stick region and smooth gate (smoothstep) */
+    const float v_s   = 0.22f; /* idk man too many magic numbers */
+    float       g_raw = lcc_clamp(s_max / v_s, 0.0f, 1.0f);
+    float       gate  = g_raw * g_raw * (3.0f - 2.0f * g_raw); /* smoothstep(0..1) */
+
+    /* slightly higher static mu than dynamic */
+    float mu_s = fminf(tp->mu_max, mu * 1.08f);
+
+    /* "viscous" gains so that at s=v_s you hit mu_s*Fz (per-axis) */
+    float K_long = (mu_s * Fz) / (v_s + 1e-3f);
+    float K_lat  = (mu_s * Fz) / (v_s + 1e-3f);
+
+    /* stick forces try to zero relative motion; cap by static ellipse */
+    float Fx_stick = -K_long * v_rel_long;
+    float Fy_stick = -K_lat * v_lat;
+
+    float mag_stick   = sqrtf(Fx_stick * Fx_stick + Fy_stick * Fy_stick);
+    float limit_stick = mu_s * Fz;
+    if(mag_stick > limit_stick && mag_stick > 1e-6f) {
+      float scl = limit_stick / mag_stick;
+      Fx_stick *= scl;
+      Fy_stick *= scl;
+    }
+
+    /* blend stick -> MF with speed; removes sign flip at v0 */
+    Fx_pure = lcc_lerp(Fx_stick, Fx_pure, gate);
+    Fy_pure = lcc_lerp(Fy_stick, Fy_pure, gate);
+
+    /* small lateral viscous term to soak the last bit of energy */
+    const float C_lat_visc = 180.0f;
+    Fy_pure -= C_lat_visc * v_lat;
+
+    /* final ellipse clamp with _eff (s->) */
+    float mu_eff = lcc_lerp(mu_s, mu, gate);
+    float Fmax   = mu_eff * Fz;
+    float mag    = sqrtf(Fx_pure * Fx_pure + Fy_pure * Fy_pure);
+    float scale  = (mag > Fmax && mag > 1e-6f) ? (Fmax / mag) : 1.0f;
 
     Fx = Fx_pure * scale;
     Fy = Fy_pure * scale;
@@ -1166,6 +1227,19 @@ static void lcc_vehicle_step(lcc_car_t *car) {
   lcc_aero_forces(car, Fdrag, &DFf, &DFr);
   Fw[0] += Fdrag[0];
   Fw[1] += Fdrag[1];
+
+  /* near-rest damping (only at crawl speeds) */
+  {
+    float vmag = sqrtf(car->velocity[0] * car->velocity[0] + car->velocity[1] * car->velocity[1]);
+    float gate = 1.0f - lcc_clamp(vmag / 0.8f, 0.0f, 1.0f); /* full at 0, fades out by ~0.8 m/s */
+
+    const float C_lin = 250.0f; /* N*s/m (tune 150..350) */
+    const float C_yaw = 800.0f; /* N*m*s  (tune 500..1200) */
+
+    Fw[0] -= C_lin * gate * car->velocity[0];
+    Fw[1] -= C_lin * gate * car->velocity[1];
+    Mz -= C_yaw * gate * car->angular_velocity;
+  }
 
   /* integrate linear motion */
   float ax = Fw[0] / car->mass;
