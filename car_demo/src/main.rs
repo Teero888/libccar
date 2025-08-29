@@ -715,29 +715,32 @@ impl App {
         self.config = CarConfig::from_car(&self.car);
     }
 
-    unsafe fn handle_input(&mut self, ctx: &egui::Context) {
+    unsafe fn handle_input(&mut self, ctx: &egui::Context, dt: f32) {
         let input = ctx.input(|i| i.clone());
 
-        let left = input.key_down(egui::Key::A);
-        let right = input.key_down(egui::Key::D);
-        let target_steer = match (left, right) {
-            (true, false) => -1.0,
-            (false, true) => 1.0,
-            _ => 0.0,
+        let target_steer = if input.key_down(egui::Key::A) {
+            -1.0
+        } else if input.key_down(egui::Key::D) {
+            1.0
+        } else {
+            0.0
         };
-        self.input.steer = lerp(self.input.steer, target_steer, 0.1);
+        self.input.steer = linear_approach(self.input.steer, target_steer, 2.0, dt); // Rate of 2.0 units/sec
 
+        // Throttle input
         let throttle_down = input.key_down(egui::Key::K);
         let target_throttle = if throttle_down { 1.0 } else { 0.0 };
-        self.input.throttle = smooth_approach(self.input.throttle, target_throttle, 0.02, 0.02);
+        self.input.throttle = linear_approach(self.input.throttle, target_throttle, 2.0, dt); // Rate of 2.0 units/sec
 
+        // Brake input
         let brake_down = input.key_down(egui::Key::J);
         let target_brake = if brake_down { 1.0 } else { 0.0 };
-        self.input.brake = smooth_approach(self.input.brake, target_brake, 0.02, 0.02);
+        self.input.brake = linear_approach(self.input.brake, target_brake, 2.0, dt); // Rate of 2.0 units/sec
 
+        // Clutch input
         let clutch_down = input.key_down(egui::Key::H);
         let target_clutch = if clutch_down { 1.0 } else { 0.0 };
-        self.input.clutch = smooth_approach(self.input.clutch, target_clutch, 0.05, 0.05);
+        self.input.clutch = linear_approach(self.input.clutch, target_clutch, 5.0, dt); // Rate of 5.0 units/
 
         let w = input.key_pressed(egui::Key::W);
         let s = input.key_pressed(egui::Key::S);
@@ -917,7 +920,7 @@ impl App {
 
         dt = (dt * self.sim_speed).clamp(0.0, 0.1);
 
-        self.handle_input(ctx);
+        self.handle_input(ctx, dt);
 
         if self.paused {
             return;
@@ -1793,9 +1796,14 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t.clamp(0.0, 1.0)
 }
 
-fn smooth_approach(v: f32, target: f32, rise: f32, fall: f32) -> f32 {
-    let k = if target > v { rise } else { fall };
-    lerp(v, target, k)
+fn linear_approach(current: f32, target: f32, rate: f32, dt: f32) -> f32 {
+    let diff = target - current;
+    let step = rate * dt;
+    if diff.abs() <= step {
+        target
+    } else {
+        current + diff.signum() * step
+    }
 }
 
 fn draw_grid(painter: &Painter, rect: Rect, cam: Vec2, zoom: f32) {
