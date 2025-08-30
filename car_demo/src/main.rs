@@ -1,4 +1,5 @@
-#![allow(clippy::missing_safety_doc)]
+#![allow(clippy::missing_safety_doc, non_camel_case_types, non_snake_case, non_upper_case_globals)]
+
 use eframe::{
     egui,
     egui::{Color32, Painter, RichText, Stroke},
@@ -9,20 +10,34 @@ use egui_plot::{HLine, Legend, Line, Plot, PlotPoints};
 use glam::{Mat2, Vec2};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use std::{f32::consts::PI, time::Instant};
+use std::{ffi::CStr, f32::consts::PI, mem, time::Instant};
 
 mod ffi {
     #![allow(non_camel_case_types, non_snake_case, non_upper_case_globals, unused)]
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 }
 
+use crate::ffi::{
+    lcc_drivetrain_layout_e_LCC_LAYOUT_FWD as LCC_LAYOUT_FWD,
+    lcc_drivetrain_layout_e_LCC_LAYOUT_RWD as LCC_LAYOUT_RWD,
+    lcc_drivetrain_layout_e_LCC_LAYOUT_AWD as LCC_LAYOUT_AWD,
+    lcc_drivetrain_layout_e_LCC_LAYOUT_4X4 as LCC_LAYOUT_4X4,
+    lcc_transmission_type_e_LCC_TRANS_MANUAL as LCC_TRANS_MANUAL,
+    lcc_transmission_type_e_LCC_TRANS_DCT as LCC_TRANS_DCT,
+    lcc_abs_mode_e_LCC_ABS_ON as LCC_ABS_ON,
+    lcc_abs_mode_e_LCC_ABS_OFF as LCC_ABS_OFF,
+    lcc_tc_mode_e_LCC_TC_ON as LCC_TC_ON,
+    lcc_tc_mode_e_LCC_TC_OFF as LCC_TC_OFF,
+    lcc_esc_mode_e_LCC_ESC_ON as LCC_ESC_ON,
+    lcc_esc_mode_e_LCC_ESC_OFF as LCC_ESC_OFF,
+};
+
 static VERSION: Lazy<String> = Lazy::new(|| unsafe {
-    let cstr = ffi::lcc_get_version();
+    let cstr = ffi::lcc_version_string();
     if cstr.is_null() {
         "unknown".to_string()
     } else {
-        let s = std::ffi::CStr::from_ptr(cstr);
-        s.to_string_lossy().to_string()
+        CStr::from_ptr(cstr).to_string_lossy().to_string()
     }
 });
 
@@ -34,7 +49,6 @@ enum ViewPreset {
     Supercar,
     Hypercar,
 }
-
 impl ViewPreset {
     fn all() -> &'static [ViewPreset] {
         &[
@@ -54,15 +68,6 @@ impl ViewPreset {
             ViewPreset::Hypercar => "Hypercar",
         }
     }
-    fn to_c_enum(self) -> ffi::lcc_preset_t {
-        match self {
-            ViewPreset::Economy => ffi::lcc_preset_t_LCC_PRESET_ECONOMY,
-            ViewPreset::Midsize => ffi::lcc_preset_t_LCC_PRESET_MIDSIZE,
-            ViewPreset::Sports => ffi::lcc_preset_t_LCC_PRESET_SPORTS,
-            ViewPreset::Supercar => ffi::lcc_preset_t_LCC_PRESET_SUPERCAR,
-            ViewPreset::Hypercar => ffi::lcc_preset_t_LCC_PRESET_HYPERCAR,
-        }
-    }
 }
 
 #[derive(Serialize, Clone)]
@@ -71,7 +76,7 @@ struct WheelSample {
     slip_angle: f32,
     load: f32,
     temp: f32,
-    surface_mu: f32,
+    est_mu: f32,
 }
 
 #[derive(Serialize, Clone)]
@@ -93,13 +98,12 @@ struct TelemetrySample {
     wheels: [WheelSample; 4],
 }
 
-struct Telemetry {
+struct TelemetryRec {
     recording: bool,
     data: Vec<TelemetrySample>,
     max_points: usize,
 }
-
-impl Telemetry {
+impl TelemetryRec {
     fn new() -> Self {
         Self {
             recording: false,
@@ -121,77 +125,21 @@ impl Telemetry {
     fn export_csv(&self, path: &std::path::Path) -> anyhow::Result<()> {
         let mut wtr = csv::Writer::from_path(path)?;
         wtr.write_record(&[
-            "t",
-            "pos_x",
-            "pos_y",
-            "vel_x",
-            "vel_y",
-            "speed_kmh",
-            "yaw",
-            "yaw_rate",
-            "engine_rpm",
-            "gear",
-            "throttle",
-            "brake",
-            "steering",
-            "clutch",
-            "w0_slip_ratio",
-            "w0_slip_angle",
-            "w0_load",
-            "w0_temp",
-            "w0_mu",
-            "w1_slip_ratio",
-            "w1_slip_angle",
-            "w1_load",
-            "w1_temp",
-            "w1_mu",
-            "w2_slip_ratio",
-            "w2_slip_angle",
-            "w2_load",
-            "w2_temp",
-            "w2_mu",
-            "w3_slip_ratio",
-            "w3_slip_angle",
-            "w3_load",
-            "w3_temp",
-            "w3_mu",
+            "t","pos_x","pos_y","vel_x","vel_y","speed_kmh","yaw","yaw_rate",
+            "engine_rpm","gear","throttle","brake","steering","clutch",
+            "w0_slip_ratio","w0_slip_angle","w0_load","w0_temp","w0_mu",
+            "w1_slip_ratio","w1_slip_angle","w1_load","w1_temp","w1_mu",
+            "w2_slip_ratio","w2_slip_angle","w2_load","w2_temp","w2_mu",
+            "w3_slip_ratio","w3_slip_angle","w3_load","w3_temp","w3_mu",
         ])?;
         for s in &self.data {
             let rec = vec![
-                s.t,
-                s.pos_x,
-                s.pos_y,
-                s.vel_x,
-                s.vel_y,
-                s.speed_kmh,
-                s.yaw,
-                s.yaw_rate,
-                s.engine_rpm,
-                s.gear as f32,
-                s.throttle,
-                s.brake,
-                s.steering,
-                s.clutch,
-                s.wheels[0].slip_ratio,
-                s.wheels[0].slip_angle,
-                s.wheels[0].load,
-                s.wheels[0].temp,
-                s.wheels[0].surface_mu,
-                s.wheels[1].slip_ratio,
-                s.wheels[1].slip_angle,
-                s.wheels[1].load,
-                s.wheels[1].temp,
-                s.wheels[1].surface_mu,
-                s.wheels[2].slip_ratio,
-                s.wheels[2].slip_angle,
-                s.wheels[2].load,
-                s.wheels[2].temp,
-                s.wheels[2].surface_mu,
-                s.wheels[3].slip_ratio,
-                s.wheels[3].slip_angle,
-                s.wheels[3].load,
-                s.wheels[3].temp,
-                s.wheels[3].surface_mu,
+                s.t, s.pos_x, s.pos_y, s.vel_x, s.vel_y, s.speed_kmh, s.yaw, s.yaw_rate,
+                s.engine_rpm, s.gear as f32, s.throttle, s.brake, s.steering, s.clutch,
+                s.wheels[0].slip_ratio, s.wheels[0].slip_angle, s.wheels[0].load, s.wheels[0].temp, s.wheels[0].est_mu,
+                s.wheels[1].slip_ratio, s.wheels[1].slip_angle, s.wheels[1].load, s.wheels[1].temp, s.wheels[1].est_mu,
+                s.wheels[2].slip_ratio, s.wheels[2].slip_angle, s.wheels[2].load, s.wheels[2].temp, s.wheels[2].est_mu,
+                s.wheels[3].slip_ratio, s.wheels[3].slip_angle, s.wheels[3].load, s.wheels[3].temp, s.wheels[3].est_mu,
             ];
             wtr.serialize(rec)?;
         }
@@ -207,315 +155,130 @@ impl Telemetry {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct CarCfg {
-    mass: f32,
-    inertia: f32, // if <= 0, auto-calc from mass, wheelbase, track_width
+    mass_kg: f32,
     wheelbase: f32,
-    track_width: f32,
+    track_front: f32,
+    track_rear: f32,
     cg_height: f32,
-    cg_position: f32,
-    front_brake_bias: f32,
-    max_brake_torque: f32,
-    air_density: f32,
-    ambient_temp: f32,
-    surface_friction: f32,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-struct EngineCfg {
-    max_power: f32,
-    max_torque: f32,
-    idle_rpm: f32,
-    max_rpm: f32,
-    redline_rpm: f32,
-    inertia: f32,
-    friction: f32,
-    response_time: f32,
-    peak_torque_rpm: f32,
-    peak_power_rpm: f32,
-    engine_brake_coeff: f32,
-    friction_quadratic: f32,
-    idle_torque: f32,
-    stall_rpm: f32,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-struct TransCfg {
-    num_gears: i32,
-    gear_ratios: Vec<f32>, // len == num_gears
     final_drive: f32,
-    reverse_ratio: f32,
-    efficiency: f32,
-    drive_type: String, // "RWD"|"FWD"|"AWD"
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-struct DiffCfg {
-    preload: f32,
-    power_factor: f32,
-    coast_factor: f32,
-    viscous_coefficient: f32,
-    bias_limit: f32,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-struct AeroCfg {
-    drag_coefficient: f32,
+    layout: u32, // LCC_LAYOUT_FWD/RWD/AWD/4X4
+    // aero
+    cd: f32,
     frontal_area: f32,
-    downforce_coefficient: f32,
-    downforce_area: f32,
-    aero_balance_front: f32,
+    cl_front: f32,
+    cl_rear: f32,
+    // steering
+    max_steer_deg: f32,
+    ackermann: f32,
+    // tire mu scale
+    global_mu: f32,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct TireCfg {
-    radius: f32,
-    width: f32,
-    aspect_ratio: f32,
-    pressure: f32,
-    nominal_load: f32,
-    peak_friction: f32,
-    slip_friction: f32,
-    stiffness: f32,
-    cornering_stiffness: f32,
-    camber_stiffness: f32,
+    mu_nominal: f32,
+    pressure_kpa: f32,
     rolling_resistance: f32,
-    relax_length_long: f32,
-    relax_length_lat: f32,
-    load_sensitivity: f32,
-    mu_min: f32,
-    mu_max: f32,
+    load_sens: f32,
+    radius_m: f32,
+    width_m: f32,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct WheelCfg {
     pos_x: f32,
     pos_y: f32,
-    rotational_inertia: f32,
-    camber_angle: f32,
-    surface_friction: f32,
+    steerable: bool,
+    driven: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct CarConfig {
     car: CarCfg,
-    engine: EngineCfg,
-    trans: TransCfg,
-    diff: DiffCfg,
-    aero: AeroCfg,
     tires: [TireCfg; 4],
     wheels: [WheelCfg; 4],
 }
 
 impl CarConfig {
-    unsafe fn from_car(car: &ffi::lcc_car_t) -> Self {
+    fn from_desc(desc: &ffi::lcc_car_desc_t) -> Self {
         let mut cfg = CarConfig::default();
-
         cfg.car = CarCfg {
-            mass: car.mass,
-            inertia: car.inertia,
-            wheelbase: car.wheelbase,
-            track_width: car.track_width,
-            cg_height: car.cg_height,
-            cg_position: car.cg_position,
-            front_brake_bias: car.front_brake_bias,
-            max_brake_torque: car.max_brake_torque,
-            air_density: car.air_density,
-            ambient_temp: car.ambient_temp,
-            surface_friction: car.surface_friction,
+            mass_kg: desc.chassis.mass_kg,
+            wheelbase: desc.chassis.wheelbase_m,
+            track_front: desc.chassis.track_front_m,
+            track_rear: desc.chassis.track_rear_m,
+            cg_height: desc.chassis.cg_height_m,
+            final_drive: desc.transmission.final_drive_ratio,
+            layout: desc.driveline.layout,
+            cd: desc.aero.drag_coefficient,
+            frontal_area: desc.aero.frontal_area_m2,
+            cl_front: desc.aero.lift_coefficient_front,
+            cl_rear: desc.aero.lift_coefficient_rear,
+            max_steer_deg: desc.steering.max_steer_deg,
+            ackermann: desc.steering.ackermann_factor,
+            global_mu: 1.0, // environment global friction scale (edited via env)
         };
-
-        cfg.engine = EngineCfg {
-            max_power: car.engine.max_power,
-            max_torque: car.engine.max_torque,
-            idle_rpm: car.engine.idle_rpm,
-            max_rpm: car.engine.max_rpm,
-            redline_rpm: car.engine.redline_rpm,
-            inertia: car.engine.inertia,
-            friction: car.engine.friction,
-            response_time: car.engine.response_time,
-            peak_torque_rpm: car.engine.peak_torque_rpm,
-            peak_power_rpm: car.engine.peak_power_rpm,
-            engine_brake_coeff: car.engine.engine_brake_coeff,
-            friction_quadratic: car.engine.friction_quadratic,
-            idle_torque: car.engine.idle_torque,
-            stall_rpm: car.engine.stall_rpm,
-        };
-
-        let drive_type = match car.transmission.drive_type {
-            x if x == ffi::lcc_drive_t_LCC_DRIVE_RWD => "RWD",
-            x if x == ffi::lcc_drive_t_LCC_DRIVE_FWD => "FWD",
-            _ => "AWD",
-        }
-        .to_string();
-
-        let mut gear_ratios = Vec::new();
-        let ng = car.transmission.num_gears as usize;
-        for i in 0..ng.min(8) {
-            gear_ratios.push(car.transmission.gear_ratios[i]);
-        }
-        cfg.trans = TransCfg {
-            num_gears: car.transmission.num_gears,
-            gear_ratios,
-            final_drive: car.transmission.final_drive,
-            reverse_ratio: car.transmission.reverse_ratio,
-            efficiency: car.transmission.efficiency,
-            drive_type,
-        };
-
-        cfg.diff = DiffCfg {
-            preload: car.differential.preload,
-            power_factor: car.differential.power_factor,
-            coast_factor: car.differential.coast_factor,
-            viscous_coefficient: car.differential.viscous_coefficient,
-            bias_limit: car.differential.bias_limit,
-        };
-
-        cfg.aero = AeroCfg {
-            drag_coefficient: car.aerodynamics.drag_coefficient,
-            frontal_area: car.aerodynamics.frontal_area,
-            downforce_coefficient: car.aerodynamics.downforce_coefficient,
-            downforce_area: car.aerodynamics.downforce_area,
-            aero_balance_front: car.aerodynamics.aero_balance_front,
-        };
-
-        for i in 0..4 {
-            let tp = &car.tire_params[i];
+        for i in 0..4usize {
             cfg.tires[i] = TireCfg {
-                radius: tp.radius,
-                width: tp.width,
-                aspect_ratio: tp.aspect_ratio,
-                pressure: tp.pressure,
-                nominal_load: tp.nominal_load,
-                peak_friction: tp.peak_friction,
-                slip_friction: tp.slip_friction,
-                stiffness: tp.stiffness,
-                cornering_stiffness: tp.cornering_stiffness,
-                camber_stiffness: tp.camber_stiffness,
-                rolling_resistance: tp.rolling_resistance,
-                relax_length_long: tp.relax_length_long,
-                relax_length_lat: tp.relax_length_lat,
-                load_sensitivity: tp.load_sensitivity,
-                mu_min: tp.mu_min,
-                mu_max: tp.mu_max,
+                mu_nominal: desc.tires[i].mu_nominal,
+                pressure_kpa: desc.tires[i].pressure_kpa,
+                rolling_resistance: desc.tires[i].rolling_resistance,
+                load_sens: desc.tires[i].load_sensitivity,
+                radius_m: desc.wheels[i].radius_m,
+                width_m: desc.wheels[i].width_m,
             };
-            let w = &car.wheels[i];
             cfg.wheels[i] = WheelCfg {
-                pos_x: w.position[0],
-                pos_y: w.position[1],
-                rotational_inertia: w.rotational_inertia,
-                camber_angle: w.camber_angle,
-                surface_friction: w.surface_friction,
+                pos_x: desc.wheels[i].position_local[0],
+                pos_y: desc.wheels[i].position_local[1],
+                steerable: desc.wheels[i].steerable != 0,
+                driven: desc.wheels[i].driven != 0,
             };
         }
         cfg
     }
+    fn apply_runtime(&self, car: *mut ffi::lcc_car_t, desc: &mut ffi::lcc_car_desc_t, env: &mut ffi::lcc_environment_t) {
+        unsafe {
+            // environment friction scale
+            env.global_friction_scale = self.car.global_mu;
+            ffi::lcc_car_set_environment(car, env as *const _);
 
-    unsafe fn apply_to_car(&self, car: &mut ffi::lcc_car_t) {
-        // Top-level
-        car.mass = self.car.mass;
-        car.wheelbase = self.car.wheelbase;
-        car.track_width = self.car.track_width;
-        car.cg_height = self.car.cg_height;
-        car.cg_position = self.car.cg_position;
-        car.front_brake_bias = self.car.front_brake_bias.clamp(0.0, 1.0);
-        car.max_brake_torque = self.car.max_brake_torque.max(0.0);
-        car.air_density = self.car.air_density.max(0.5);
-        car.ambient_temp = self.car.ambient_temp;
-        car.surface_friction = self.car.surface_friction.max(0.05);
+            // tires/wheels basic params per wheel
+            for i in 0..4 {
+                // wheel radius/width is in wheel_desc, but at runtime we'll only change tires + brakes/susp later if needed
+                let mut t = desc.tires[i];
+                t.mu_nominal = self.tires[i].mu_nominal;
+                t.pressure_kpa = self.tires[i].pressure_kpa;
+                t.rolling_resistance = self.tires[i].rolling_resistance;
+                t.load_sensitivity = self.tires[i].load_sens;
+                let _ = ffi::lcc_car_set_tire_params(car, i as i32, &t as *const _);
 
-        // Engine
-        car.engine.max_power = self.engine.max_power.max(0.0);
-        car.engine.max_torque = self.engine.max_torque.max(0.0);
-        car.engine.idle_rpm = self.engine.idle_rpm.max(200.0);
-        car.engine.max_rpm = self.engine.max_rpm.max(car.engine.idle_rpm);
-        car.engine.redline_rpm = self.engine.redline_rpm.max(car.engine.max_rpm);
-        car.engine.inertia = self.engine.inertia.max(0.01);
-        car.engine.friction = self.engine.friction.max(0.0);
-        car.engine.response_time = self.engine.response_time.max(0.01);
-        car.engine.peak_torque_rpm = self.engine.peak_torque_rpm.max(500.0);
-        car.engine.peak_power_rpm = self.engine.peak_power_rpm.max(500.0);
-        car.engine.engine_brake_coeff = self.engine.engine_brake_coeff.max(0.0);
-        car.engine.friction_quadratic = self.engine.friction_quadratic.max(0.0);
-        car.engine.idle_torque = self.engine.idle_torque.max(0.0);
-        car.engine.stall_rpm = self.engine.stall_rpm.max(300.0);
-        // Keep current rpm/throttle
+                let mut w = desc.wheels[i];
+                w.radius_m = self.tires[i].radius_m.max(0.05);
+                w.width_m = self.tires[i].width_m.max(0.05);
+                // No direct setter for wheel dims, but we can recreate for structural changes. For runtime, skip.
+                desc.tires[i] = t;
+                desc.wheels[i] = w;
+            }
 
-        // Transmission
-        car.transmission.num_gears = self.trans.num_gears.clamp(0, 8);
-        for i in 0..8 {
-            let v = *self.trans.gear_ratios.get(i).unwrap_or(&0.0);
-            car.transmission.gear_ratios[i] = v;
-        }
-        car.transmission.final_drive = self.trans.final_drive.max(0.0);
-        car.transmission.reverse_ratio = self.trans.reverse_ratio.max(0.0);
-        car.transmission.efficiency = self.trans.efficiency.clamp(0.0, 1.0);
-        car.transmission.drive_type = match self.trans.drive_type.as_str() {
-            "FWD" => ffi::lcc_drive_t_LCC_DRIVE_FWD,
-            "AWD" => ffi::lcc_drive_t_LCC_DRIVE_AWD,
-            _ => ffi::lcc_drive_t_LCC_DRIVE_RWD,
-        };
+            // steering params
+            desc.steering.max_steer_deg = self.car.max_steer_deg;
+            desc.steering.ackermann_factor = self.car.ackermann;
+            let _ = ffi::lcc_car_set_steering_params(car, &desc.steering as *const _);
 
-        // Differential
-        car.differential.preload = self.diff.preload.max(0.0);
-        car.differential.power_factor = self.diff.power_factor.max(0.0);
-        car.differential.coast_factor = self.diff.coast_factor.max(0.0);
-        car.differential.viscous_coefficient = self.diff.viscous_coefficient.max(0.0);
-        car.differential.bias_limit = self.diff.bias_limit.max(0.0);
+            // aero
+            desc.aero.drag_coefficient = self.car.cd;
+            desc.aero.frontal_area_m2 = self.car.frontal_area;
+            desc.aero.lift_coefficient_front = self.car.cl_front;
+            desc.aero.lift_coefficient_rear = self.car.cl_rear;
+            // No dedicated runtime setter; used internally in step from desc snapshot.
 
-        // Aero
-        car.aerodynamics.drag_coefficient = self.aero.drag_coefficient.max(0.0);
-        car.aerodynamics.frontal_area = self.aero.frontal_area.max(0.1);
-        car.aerodynamics.downforce_coefficient = self.aero.downforce_coefficient;
-        car.aerodynamics.downforce_area = self.aero.downforce_area.max(0.0);
-        car.aerodynamics.aero_balance_front = self.aero.aero_balance_front.clamp(0.0, 1.0);
+            // final drive (runtime)
+            let ratios = desc.transmission.gear_ratios.as_ptr();
+            let count = desc.transmission.gear_count;
+            let _ = ffi::lcc_car_set_gear_ratios(car, ratios, count, self.car.final_drive);
+            desc.transmission.final_drive_ratio = self.car.final_drive;
 
-        // Tires/Wheels
-        for i in 0..4 {
-            let tp = &mut car.tire_params[i];
-            let src = &self.tires[i];
-            tp.radius = src.radius.max(0.05);
-            tp.width = src.width.max(0.05);
-            tp.aspect_ratio = src.aspect_ratio.max(0.1);
-            tp.pressure = src.pressure.max(0.0);
-            tp.nominal_load = src.nominal_load.max(1.0);
-            tp.peak_friction = src.peak_friction.max(0.1);
-            tp.slip_friction = src.slip_friction.max(0.1);
-            tp.stiffness = src.stiffness.max(0.0);
-            tp.cornering_stiffness = src.cornering_stiffness.max(0.0);
-            tp.camber_stiffness = src.camber_stiffness.max(0.0);
-            tp.rolling_resistance = src.rolling_resistance.max(0.0);
-            tp.relax_length_long = src.relax_length_long.max(0.01);
-            tp.relax_length_lat = src.relax_length_lat.max(0.01);
-            tp.load_sensitivity = src.load_sensitivity.clamp(0.0, 1.0);
-            tp.mu_min = src.mu_min.max(0.0);
-            tp.mu_max = src.mu_max.max(tp.mu_min);
-
-            let w = &mut car.wheels[i];
-            let wc = &self.wheels[i];
-            w.position[0] = wc.pos_x;
-            w.position[1] = wc.pos_y;
-            w.rotational_inertia = wc.rotational_inertia.max(0.01);
-            w.camber_angle = wc.camber_angle;
-            w.surface_friction = wc.surface_friction.max(0.05);
-        }
-
-        // Inertia: use provided if > 0, else recompute
-        car.inertia = if self.car.inertia > 0.0 {
-            self.car.inertia
-        } else {
-            car.mass * (car.wheelbase * car.wheelbase + car.track_width * car.track_width) / 12.0
-        };
-
-        // Re-init load smoothing based on static distribution at rest
-        let w = car.mass * 9.81;
-        let wf = w * (1.0 - car.cg_position);
-        let wr = w * (car.cg_position);
-        car.Fz_smooth[0] = 0.5 * wf;
-        car.Fz_smooth[1] = 0.5 * wf;
-        car.Fz_smooth[2] = 0.5 * wr;
-        car.Fz_smooth[3] = 0.5 * wr;
-        for i in 0..4 {
-            car.wheels[i].load = car.Fz_smooth[i];
+            // driveline layout affects driven flag; need recreate for correct wheel driven flags.
         }
     }
 }
@@ -528,22 +291,65 @@ struct InputState {
     last_w: bool,
     last_s: bool,
 }
-
 impl InputState {
     fn new() -> Self {
+        Self { throttle: 0.0, brake: 0.0, steer: 0.0, clutch: 0.0, last_w: false, last_s: false }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SkidSegment {
+    p0: Vec2,
+    p1: Vec2,
+    strength: f32,
+    ttl: f32,
+}
+
+struct Plots {
+    rpm: Vec<(f32, f32)>,
+    speed: Vec<(f32, f32)>,
+    wheel_omega: [Vec<(f32, f32)>; 4],
+    slip_ratios: [Vec<(f32, f32)>; 4],
+    yaw_rate: Vec<(f32, f32)>,
+    start_time: Instant,
+    max_len: usize,
+}
+impl Plots {
+    fn new() -> Self {
         Self {
-            throttle: 0.0,
-            brake: 0.0,
-            steer: 0.0,
-            clutch: 0.0,
-            last_w: false,
-            last_s: false,
+            rpm: Vec::new(),
+            speed: Vec::new(),
+            wheel_omega: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+            slip_ratios: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+            yaw_rate: Vec::new(),
+            start_time: Instant::now(),
+            max_len: 3000,
         }
+    }
+    fn t(&self) -> f32 { (Instant::now() - self.start_time).as_secs_f32() }
+    fn push(&mut self, rpm: f32, speed_kmh: f32, omega: [f32; 4], slip: [f32; 4], yaw_rate: f32) {
+        let t = self.t();
+        self.rpm.push((t, rpm));
+        self.speed.push((t, speed_kmh));
+        self.yaw_rate.push((t, yaw_rate));
+        for i in 0..4 {
+            self.wheel_omega[i].push((t, omega[i]));
+            self.slip_ratios[i].push((t, slip[i]));
+            if self.wheel_omega[i].len() > self.max_len { self.wheel_omega[i].remove(0); }
+            if self.slip_ratios[i].len() > self.max_len { self.slip_ratios[i].remove(0); }
+        }
+        if self.rpm.len() > self.max_len { self.rpm.remove(0); }
+        if self.speed.len() > self.max_len { self.speed.remove(0); }
+        if self.yaw_rate.len() > self.max_len { self.yaw_rate.remove(0); }
     }
 }
 
 struct App {
-    car: ffi::lcc_car_t,
+    car: *mut ffi::lcc_car_t,
+    desc: ffi::lcc_car_desc_t,
+    env: ffi::lcc_environment_t,
+    controls: ffi::lcc_controls_t,
+
     preset: ViewPreset,
     last_tick: Instant,
     accumulator: f32,
@@ -551,13 +357,12 @@ struct App {
     paused: bool,
     sim_speed: f32,
     input: InputState,
-    telemetry: Telemetry,
+    telemetry_rec: TelemetryRec,
     plots: Plots,
     zoom: f32,
     follow_camera: bool,
     camera_pos: Vec2,
 
-    // visuals
     path_trace: Vec<Vec2>,
     max_trace_points: usize,
     trace_point_spacing_m: f32,
@@ -573,88 +378,116 @@ struct App {
     last_wheel_world: [Vec2; 4],
     have_last_wheel_world: bool,
 
-    // Electrics / ignition
-    key_pos_ui: ffi::lcc_key_state_t, // OFF/RUN selection
-    accessory_load_watts: f32,        // user accessories
+    // driver aids toggles
+    abs_on: bool,
+    tc_on: bool,
+    esc_on: bool,
 
-    // Config editor
+    // config editor
     config: CarConfig,
 }
 
-#[derive(Clone, Copy)]
-struct SkidSegment {
-    p0: Vec2,
-    p1: Vec2,
-    strength: f32, // 0..1
-    ttl: f32,
-}
-
-struct Plots {
-    rpm: Vec<(f32, f32)>,
-    speed: Vec<(f32, f32)>,
-    wheel_omega: [Vec<(f32, f32)>; 4],
-    slip_ratios: [Vec<(f32, f32)>; 4],
-    yaw_rate: Vec<(f32, f32)>,
-    start_time: Instant,
-    max_len: usize,
-}
-
-impl Plots {
-    fn new() -> Self {
-        Self {
-            rpm: Vec::new(),
-            speed: Vec::new(),
-            wheel_omega: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
-            slip_ratios: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
-            yaw_rate: Vec::new(),
-            start_time: Instant::now(),
-            max_len: 3000,
-        }
-    }
-    fn t(&self) -> f32 {
-        (Instant::now() - self.start_time).as_secs_f32()
-    }
-    fn push(
-        &mut self,
-        rpm: f32,
-        speed: f32,
-        inputs: [f32; 4],
-        slip_ratios: [f32; 4],
-        yaw_rate: f32,
-    ) {
-        let t = self.t();
-        self.rpm.push((t, rpm));
-        self.speed.push((t, speed));
-        self.yaw_rate.push((t, yaw_rate));
-        for i in 0..4 {
-            self.wheel_omega[i].push((t, inputs[i]));
-            self.slip_ratios[i].push((t, slip_ratios[i]));
-            if self.slip_ratios[i].len() > self.max_len {
-                self.slip_ratios[i].remove(0);
-            }
-        }
-        if self.rpm.len() > self.max_len {
-            self.rpm.remove(0);
-        }
-        if self.speed.len() > self.max_len {
-            self.speed.remove(0);
-        }
-        if self.yaw_rate.len() > self.max_len {
-            self.yaw_rate.remove(0);
-        }
-        for i in 0..4 {
-            if self.wheel_omega[i].len() > self.max_len {
-                self.wheel_omega[i].remove(0);
+impl Drop for App {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.car.is_null() {
+                ffi::lcc_car_destroy(self.car);
             }
         }
     }
 }
 
 impl App {
+    unsafe fn make_desc_from_preset(preset: ViewPreset) -> ffi::lcc_car_desc_t {
+        let mut d: ffi::lcc_car_desc_t = mem::zeroed();
+        ffi::lcc_car_desc_init_defaults(&mut d);
+
+        match preset {
+            ViewPreset::Economy => {
+                d.chassis.mass_kg = 1100.0;
+                d.driveline.layout = LCC_LAYOUT_FWD;
+                d.engine.displacement_l = 1.4;
+                d.engine.redline_rpm = 6200.0;
+                d.tires[0].mu_nominal = 0.95;
+                d.tires[1].mu_nominal = 0.95;
+                d.tires[2].mu_nominal = 0.95;
+                d.tires[3].mu_nominal = 0.95;
+            }
+            ViewPreset::Midsize => {
+                d.chassis.mass_kg = 1400.0;
+                d.driveline.layout = LCC_LAYOUT_FWD;
+                d.engine.displacement_l = 2.0;
+                d.engine.redline_rpm = 6500.0;
+                for i in 0..4 { d.tires[i].mu_nominal = 1.05; }
+            }
+            ViewPreset::Sports => {
+                d.chassis.mass_kg = 1350.0;
+                d.driveline.layout = LCC_LAYOUT_RWD;
+                d.engine.displacement_l = 3.0;
+                d.engine.redline_rpm = 7000.0;
+                for i in 0..4 { d.tires[i].mu_nominal = 1.15; d.tires[i].pressure_kpa = 230.0; }
+                d.transmission.type_ = LCC_TRANS_MANUAL;
+                d.transmission.final_drive_ratio = 4.1;
+            }
+            ViewPreset::Supercar => {
+                d.chassis.mass_kg = 1450.0;
+                d.driveline.layout = LCC_LAYOUT_AWD;
+                d.engine.displacement_l = 4.0;
+                d.engine.redline_rpm = 8000.0;
+                for i in 0..4 { d.tires[i].mu_nominal = 1.35; d.tires[i].pressure_kpa = 240.0; }
+                d.aero.lift_coefficient_front = -0.3;
+                d.aero.lift_coefficient_rear = -0.6;
+                d.transmission.type_ = LCC_TRANS_DCT;
+                d.transmission.final_drive_ratio = 3.5;
+            }
+            ViewPreset::Hypercar => {
+                d.chassis.mass_kg = 1250.0;
+                d.driveline.layout = LCC_LAYOUT_AWD;
+                d.engine.displacement_l = 5.2;
+                d.engine.redline_rpm = 8500.0;
+                for i in 0..4 { d.tires[i].mu_nominal = 1.5; d.tires[i].pressure_kpa = 250.0; }
+                d.aero.lift_coefficient_front = -0.5;
+                d.aero.lift_coefficient_rear = -1.0;
+                d.transmission.type_ = LCC_TRANS_DCT;
+                d.transmission.final_drive_ratio = 3.3;
+            }
+        }
+
+        // simple engine maps (WOT + friction)
+        fn make_curve<const N: usize>(pts: [(f32, f32); N]) -> ffi::lcc_curve1d_t {
+            // We'll store in static memory via Box to keep alive for the app lifetime
+            let mut v = Vec::<ffi::lcc_curve1d_point_t>::with_capacity(N);
+            for (x, y) in pts { v.push(ffi::lcc_curve1d_point_t { x, y }); }
+            let b = Box::leak(v.into_boxed_slice());
+            ffi::lcc_curve1d_t { points: b.as_ptr(), count: N as i32 }
+        }
+        d.engine.wot_torque_nm_vs_rpm = make_curve([
+            (800.0, 120.0), (1200.0, 150.0), (1800.0, 175.0), (2400.0, 195.0),
+            (3000.0, 210.0), (3600.0, 220.0), (4200.0, 225.0), (4800.0, 225.0),
+            (5400.0, 215.0), (6000.0, 200.0), (6800.0, 180.0),
+        ]);
+        d.engine.friction_torque_nm_vs_rpm = make_curve([
+            (0.0, 8.0), (1000.0, 10.0), (2000.0, 14.0), (3000.0, 18.0),
+            (4000.0, 24.0), (5000.0, 32.0), (6000.0, 42.0), (7000.0, 54.0),
+        ]);
+
+        d
+    }
+
     unsafe fn new(preset: ViewPreset) -> Self {
-        let car = ffi::lcc_car_create(preset.to_c_enum());
+        let mut env: ffi::lcc_environment_t = mem::zeroed();
+        ffi::lcc_environment_init_defaults(&mut env);
+
+        let mut desc = Self::make_desc_from_preset(preset);
+        desc.environment = env;
+
+        let car = ffi::lcc_car_create(&desc as *const _);
+
         let mut this = Self {
             car,
+            desc,
+            env,
+            controls: mem::zeroed(),
             preset,
             last_tick: Instant::now(),
             accumulator: 0.0,
@@ -662,34 +495,54 @@ impl App {
             paused: false,
             sim_speed: 1.0,
             input: InputState::new(),
-            telemetry: Telemetry::new(),
+            telemetry_rec: TelemetryRec::new(),
+            show_trace: true,
             plots: Plots::new(),
             zoom: 32.0,
             follow_camera: true,
             camera_pos: Vec2::ZERO,
-
             skid_segments: Vec::new(),
             skid_ttl: 6.0,
             show_skids: true,
             slip_ratio_threshold: 0.15,
             slip_angle_threshold: 0.12,
             min_speed_for_skid_kmh: 10.0,
-
             last_wheel_world: [Vec2::ZERO; 4],
             have_last_wheel_world: false,
-
-            key_pos_ui: ffi::lcc_key_state_t_LCC_KEY_OFF,
-            accessory_load_watts: 0.0,
-
-            max_trace_points: 4000,
+            abs_on: true,
+            tc_on: true,
+            esc_on: true,
+            config: CarConfig::from_desc(&desc),
             path_trace: Vec::new(),
-            show_trace: true,
+            max_trace_points: 4000,
             trace_point_spacing_m: 0.25,
-
-            config: CarConfig::from_car(&car),
         };
+        // Start engine initially
+        let _ = ffi::lcc_car_engine_start(this.car);
+        // Set driver aids
+        ffi::lcc_car_set_abs(this.car, if this.abs_on { LCC_ABS_ON } else { LCC_ABS_OFF });
+        ffi::lcc_car_set_tc(this.car, if this.tc_on { LCC_TC_ON } else { LCC_TC_OFF });
+        ffi::lcc_car_set_esc(this.car, if this.esc_on { LCC_ESC_ON } else { LCC_ESC_OFF });
         this.center_camera_on_car();
         this
+    }
+
+    unsafe fn recreate_from_desc(&mut self) {
+        if !self.car.is_null() { ffi::lcc_car_destroy(self.car); }
+        self.desc.environment = self.env;
+        self.car = ffi::lcc_car_create(&self.desc as *const _);
+        // start engine
+        let _ = ffi::lcc_car_engine_start(self.car);
+        // aids
+        ffi::lcc_car_set_abs(self.car, if self.abs_on { LCC_ABS_ON } else { LCC_ABS_OFF });
+        ffi::lcc_car_set_tc(self.car, if self.tc_on { LCC_TC_ON } else { LCC_TC_OFF });
+        ffi::lcc_car_set_esc(self.car, if self.esc_on { LCC_ESC_ON } else { LCC_ESC_OFF });
+        self.telemetry_rec.clear();
+        self.plots = Plots::new();
+        self.path_trace.clear();
+        self.skid_segments.clear();
+        self.have_last_wheel_world = false;
+        self.center_camera_on_car();
     }
 
     fn center_camera_on_car(&mut self) {
@@ -698,174 +551,116 @@ impl App {
     }
 
     fn world_pos(&self) -> Vec2 {
-        Vec2::new(self.car.position[0], self.car.position[1])
+        unsafe {
+            let mut cs: ffi::lcc_car_state_t = mem::zeroed();
+            ffi::lcc_car_get_state(self.car, &mut cs);
+            Vec2::new(cs.pos_world[0], cs.pos_world[1])
+        }
     }
 
     unsafe fn reset(&mut self) {
-        self.car = ffi::lcc_car_create(self.preset.to_c_enum());
-        self.plots = Plots::new();
-        self.telemetry.clear();
-        self.center_camera_on_car();
-
-        self.path_trace.clear();
-        self.skid_segments.clear();
-        self.have_last_wheel_world = false;
-
-        // refresh config from car
-        self.config = CarConfig::from_car(&self.car);
+        self.desc = Self::make_desc_from_preset(self.preset);
+        self.env = self.desc.environment;
+        self.recreate_from_desc();
+        self.config = CarConfig::from_desc(&self.desc);
     }
 
     unsafe fn handle_input(&mut self, ctx: &egui::Context, dt: f32) {
         let input = ctx.input(|i| i.clone());
 
-        let target_steer = if input.key_down(egui::Key::A) {
-            -1.0
-        } else if input.key_down(egui::Key::D) {
-            1.0
-        } else {
-            0.0
-        };
-        self.input.steer = linear_approach(self.input.steer, target_steer, 2.0, dt); // Rate of 2.0 units/sec
+        let target_steer = if input.key_down(egui::Key::A) { -1.0 } else if input.key_down(egui::Key::D) { 1.0 } else { 0.0 };
+        self.input.steer = linear_approach(self.input.steer, target_steer, 2.0, dt);
 
-        // Throttle input
         let throttle_down = input.key_down(egui::Key::K);
         let target_throttle = if throttle_down { 1.0 } else { 0.0 };
-        self.input.throttle = linear_approach(self.input.throttle, target_throttle, 2.0, dt); // Rate of 2.0 units/sec
+        self.input.throttle = linear_approach(self.input.throttle, target_throttle, 3.0, dt);
 
-        // Brake input
         let brake_down = input.key_down(egui::Key::J);
         let target_brake = if brake_down { 1.0 } else { 0.0 };
-        self.input.brake = linear_approach(self.input.brake, target_brake, 2.0, dt); // Rate of 2.0 units/sec
+        self.input.brake = linear_approach(self.input.brake, target_brake, 4.0, dt);
 
-        // Clutch input
         let clutch_down = input.key_down(egui::Key::H);
         let target_clutch = if clutch_down { 1.0 } else { 0.0 };
-        self.input.clutch = linear_approach(self.input.clutch, target_clutch, 5.0, dt); // Rate of 5.0 units/
+        self.input.clutch = linear_approach(self.input.clutch, target_clutch, 8.0, dt);
 
         let w = input.key_pressed(egui::Key::W);
         let s = input.key_pressed(egui::Key::S);
-        if w && !self.input.last_w {
-            ffi::lcc_car_shift_up(&mut self.car);
-        }
-        if s && !self.input.last_s {
-            ffi::lcc_car_shift_down(&mut self.car);
-        }
+        if w && !self.input.last_w { let _ = ffi::lcc_car_shift_up(self.car); }
+        if s && !self.input.last_s { let _ = ffi::lcc_car_shift_down(self.car); }
         self.input.last_w = w;
         self.input.last_s = s;
 
-        ffi::lcc_car_set_inputs(
-            &mut self.car,
-            self.input.throttle,
-            self.input.brake,
-            self.input.steer,
-            self.input.clutch,
-        );
-        if input.key_down(egui::Key::Space) {
-            ffi::lcc_car_set_ignition(&mut self.car, ffi::lcc_ignition_state_t_LCC_IGNITION_ON);
-        } else {
-            ffi::lcc_car_set_ignition(&mut self.car, ffi::lcc_ignition_state_t_LCC_IGNITION_OFF);
-        }
-        ffi::lcc_car_set_keypos(&mut self.car, self.key_pos_ui);
+        // starter (space) + ignition on
+        self.controls.ignition_switch = 1;
+        self.controls.starter = if input.key_down(egui::Key::Space) { 1 } else { 0 };
 
-        // Accessory load to DC bus
-        ffi::lcc_car_set_accessory_load(&mut self.car, self.accessory_load_watts.max(0.0));
+        self.controls.steer = self.input.steer;
+        self.controls.throttle = self.input.throttle;
+        self.controls.brake = self.input.brake;
+        self.controls.clutch = self.input.clutch;
+        self.controls.handbrake = 0.0;
+        ffi::lcc_car_set_controls(self.car, &self.controls as *const _);
     }
 
     unsafe fn fixed_update(&mut self, dt: f32) {
-        ffi::lcc_car_update(&mut self.car, dt);
+        let _ = ffi::lcc_car_step(self.car, dt);
+        let mut tele: ffi::lcc_telemetry_t = mem::zeroed();
+        ffi::lcc_car_get_telemetry(self.car, &mut tele);
 
-        let speed_kmh = ffi::lcc_car_get_speed(&self.car);
-        let rpm = ffi::lcc_car_get_engine_rpm(&self.car);
-
-        // Telemetry
-        let wheels = [
-            {
-                let w = self.car.wheels[0];
-                WheelSample {
-                    slip_ratio: w.slip_ratio,
-                    slip_angle: w.slip_angle,
-                    load: w.load,
-                    temp: w.temperature,
-                    surface_mu: w.surface_friction,
-                }
-            },
-            {
-                let w = self.car.wheels[1];
-                WheelSample {
-                    slip_ratio: w.slip_ratio,
-                    slip_angle: w.slip_angle,
-                    load: w.load,
-                    temp: w.temperature,
-                    surface_mu: w.surface_friction,
-                }
-            },
-            {
-                let w = self.car.wheels[2];
-                WheelSample {
-                    slip_ratio: w.slip_ratio,
-                    slip_angle: w.slip_angle,
-                    load: w.load,
-                    temp: w.temperature,
-                    surface_mu: w.surface_friction,
-                }
-            },
-            {
-                let w = self.car.wheels[3];
-                WheelSample {
-                    slip_ratio: w.slip_ratio,
-                    slip_angle: w.slip_angle,
-                    load: w.load,
-                    temp: w.temperature,
-                    surface_mu: w.surface_friction,
-                }
-            },
+        // record + plots
+        let speed_kmh = tele.car.speed_mps * 3.6;
+        let rpm = tele.engine.rpm;
+        let omega = [
+            tele.wheels[0].omega_radps,
+            tele.wheels[1].omega_radps,
+            tele.wheels[2].omega_radps,
+            tele.wheels[3].omega_radps,
         ];
+        let slip = [
+            tele.wheels[0].slip_ratio,
+            tele.wheels[1].slip_ratio,
+            tele.wheels[2].slip_ratio,
+            tele.wheels[3].slip_ratio,
+        ];
+        self.plots.push(rpm, speed_kmh, omega, slip, tele.car.yaw_rate_radps);
 
-        let sample = TelemetrySample {
-            t: self.car.simulation_time,
-            pos_x: self.car.position[0],
-            pos_y: self.car.position[1],
-            vel_x: self.car.velocity[0],
-            vel_y: self.car.velocity[1],
-            speed_kmh,
-            yaw: self.car.angle,
-            yaw_rate: self.car.angular_velocity,
-            engine_rpm: rpm,
-            gear: self.car.transmission.current_gear,
-            throttle: self.car.throttle_input,
-            brake: self.car.brake_input,
-            steering: self.car.steering_input,
-            clutch: self.car.clutch_input,
-            wheels,
+        let wheels_smpl = |i: usize| -> WheelSample {
+            let w = tele.wheels[i];
+            // Estimate mu shown: either contact override mu_dynamic or tire mu nominal * env scale
+            let mut mu = self.desc.tires[i].mu_nominal * self.env.global_friction_scale;
+            if w.contact.override_enabled != 0 {
+                mu = w.contact.mu_dynamic;
+            }
+            WheelSample {
+                slip_ratio: w.slip_ratio,
+                slip_angle: w.slip_angle_rad,
+                load: w.normal_force_n,
+                temp: w.tire_temp_c,
+                est_mu: mu,
+            }
         };
-        self.telemetry.push(sample.clone());
-
-        // Plots
-        self.plots.push(
-            rpm as f32,
-            speed_kmh as f32,
-            [
-                self.car.wheels[0].angular_velocity,
-                self.car.wheels[1].angular_velocity,
-                self.car.wheels[2].angular_velocity,
-                self.car.wheels[3].angular_velocity,
-            ],
-            [
-                self.car.wheels[0].slip_ratio as f32,
-                self.car.wheels[1].slip_ratio as f32,
-                self.car.wheels[2].slip_ratio as f32,
-                self.car.wheels[3].slip_ratio as f32,
-            ],
-            self.car.angular_velocity as f32,
-        );
+        let sample = TelemetrySample {
+            t: tele.car.time_s as f32,
+            pos_x: tele.car.pos_world[0],
+            pos_y: tele.car.pos_world[1],
+            vel_x: tele.car.vel_world[0],
+            vel_y: tele.car.vel_world[1],
+            speed_kmh,
+            yaw: tele.car.yaw_rad,
+            yaw_rate: tele.car.yaw_rate_radps,
+            engine_rpm: rpm,
+            gear: tele.transmission.gear_index,
+            throttle: tele.engine.throttle_effective,
+            brake: self.controls.brake,
+            steering: self.controls.steer,
+            clutch: self.controls.clutch,
+            wheels: [wheels_smpl(0), wheels_smpl(1), wheels_smpl(2), wheels_smpl(3)],
+        };
+        self.telemetry_rec.push(sample);
 
         // Path trace
-        let pos = self.world_pos();
-        if self
-            .path_trace
-            .last()
-            .map_or(true, |p| (*p - pos).length() > self.trace_point_spacing_m)
-        {
+        let pos = Vec2::new(tele.car.pos_world[0], tele.car.pos_world[1]);
+        if self.path_trace.last().map_or(true, |p| (*p - pos).length() > self.trace_point_spacing_m) {
             self.path_trace.push(pos);
             if self.path_trace.len() > self.max_trace_points {
                 let overflow = self.path_trace.len() - self.max_trace_points;
@@ -873,27 +668,24 @@ impl App {
             }
         }
 
-        // Skid marks
-        let rot = Mat2::from_angle(self.car.angle);
+        // Skid marks (wheel patch positions are given)
         let mut wheel_world = [Vec2::ZERO; 4];
         for i in 0..4 {
-            let w = &self.car.wheels[i];
-            let wp = Vec2::new(w.position[0], w.position[1]);
-            wheel_world[i] = pos + rot * wp;
+            wheel_world[i] = Vec2::new(tele.wheels[i].patch_world_pos[0], tele.wheels[i].patch_world_pos[1]);
         }
         if !self.have_last_wheel_world {
             self.last_wheel_world = wheel_world;
             self.have_last_wheel_world = true;
         } else {
             for i in 0..4 {
-                let w = &self.car.wheels[i];
-                let sr = w.slip_ratio.abs() as f32;
-                let sa = w.slip_angle.abs() as f32;
-                let long = sr / self.slip_ratio_threshold;
-                let lat = sa / self.slip_angle_threshold;
+                let w = tele.wheels[i];
+                let sr = w.slip_ratio.abs();
+                let sa = w.slip_angle_rad.abs();
+                let long = (sr / self.slip_ratio_threshold).max(0.0);
+                let lat = (sa / self.slip_angle_threshold).max(0.0);
                 let severity = long.max(lat).min(3.0);
                 let moving = speed_kmh > self.min_speed_for_skid_kmh;
-                let loaded = w.load > 50.0;
+                let loaded = w.normal_force_n > 50.0;
                 if self.show_skids && moving && loaded && severity >= 1.0 {
                     let strength = ((severity - 1.0) / 2.0).clamp(0.2, 1.0);
                     self.skid_segments.push(SkidSegment {
@@ -906,7 +698,6 @@ impl App {
                 self.last_wheel_world[i] = wheel_world[i];
             }
         }
-
         for seg in &mut self.skid_segments {
             seg.ttl -= dt;
         }
@@ -919,19 +710,15 @@ impl App {
         self.last_tick = now;
 
         dt = (dt * self.sim_speed).clamp(0.0, 0.1);
-
         self.handle_input(ctx, dt);
 
-        if self.paused {
-            return;
-        }
+        if self.paused { return; }
 
         self.accumulator += dt;
         while self.accumulator >= self.fixed_dt {
             self.fixed_update(self.fixed_dt);
             self.accumulator -= self.fixed_dt;
         }
-
         if self.follow_camera {
             self.camera_pos = self.world_pos();
         }
@@ -944,7 +731,7 @@ impl App {
         let center = rect.center();
 
         draw_grid(&painter, rect, self.camera_pos, self.zoom);
-        // Path trace
+
         if self.show_trace && self.path_trace.len() > 1 {
             let to_screen = |w: Vec2| -> Pos2 {
                 let rel = w - self.camera_pos;
@@ -961,7 +748,6 @@ impl App {
             ));
         }
 
-        // Skid marks
         if self.show_skids && !self.skid_segments.is_empty() {
             let to_screen = |w: Vec2| -> Pos2 {
                 let rel = w - self.camera_pos;
@@ -973,398 +759,192 @@ impl App {
                 let alpha = (200.0 * life * seg.strength) as u8;
                 let width = 2.0 + 1.5 * seg.strength;
                 let col = Color32::from_black_alpha(alpha);
-                painter.line_segment(
-                    [to_screen(seg.p0), to_screen(seg.p1)],
-                    Stroke::new(width, col),
-                );
+                painter.line_segment([to_screen(seg.p0), to_screen(seg.p1)], Stroke::new(width, col));
             }
         }
 
         unsafe {
-            let to_screen = |w: Vec2| -> Pos2 {
-                let rel = w - self.camera_pos;
-                let screen = Vec2::new(rel.x * self.zoom, -rel.y * self.zoom);
-                Pos2::new(center.x + screen.x, center.y + screen.y)
-            };
+            // draw car body
+            let mut cs: ffi::lcc_car_state_t = mem::zeroed();
+            ffi::lcc_car_get_state(self.car, &mut cs);
 
-            let pos = Vec2::new(self.car.position[0], self.car.position[1]);
-            let vel = Vec2::new(self.car.velocity[0], self.car.velocity[1]);
-            let p0 = to_screen(pos);
-            let p1 = to_screen(pos + vel * 0.5);
+            let pos = Vec2::new(cs.pos_world[0], cs.pos_world[1]);
+            let p0 = to_screen_point(pos, self.camera_pos, self.zoom, center);
+            let vel = Vec2::new(cs.vel_world[0], cs.vel_world[1]);
+            let p1 = to_screen_point(pos + vel * 0.5, self.camera_pos, self.zoom, center);
             painter.line_segment([p0, p1], Stroke::new(2.0, Color32::LIGHT_BLUE));
 
-            let angle = self.car.angle;
-            let wb = self.car.wheelbase;
-            let tw = self.car.track_width;
-            let body_len = wb + 1.0;
-            let body_w = tw + 0.4;
+            let yaw = cs.yaw_rad;
+            let rot = Mat2::from_angle(yaw);
 
-            let rot = Mat2::from_angle(angle);
+            let body_len = self.desc.chassis.length_m.max(self.desc.chassis.wheelbase_m + 0.7);
+            let body_w = self.desc.chassis.width_m.max((self.desc.chassis.track_front_m.max(self.desc.chassis.track_rear_m)) + 0.4);
             let half = Vec2::new(body_len * 0.5, body_w * 0.5);
-
             let corners = [
                 Vec2::new(half.x, -half.y),
                 Vec2::new(half.x, half.y),
                 Vec2::new(-half.x, half.y),
                 Vec2::new(-half.x, -half.y),
-            ]
-            .map(|local| pos + rot * local);
+            ].map(|local| pos + rot * local);
 
             painter.add(egui::Shape::convex_polygon(
-                corners.map(to_screen).to_vec(),
+                corners.iter().map(|&w| to_screen_point(w, self.camera_pos, self.zoom, center)).collect(),
                 Color32::from_black_alpha(20),
                 Stroke::new(2.0, Color32::from_rgb(180, 200, 220)),
             ));
 
-            for i in 0..4 {
-                let w = &self.car.wheels[i];
-                let wp = Vec2::new(w.position[0], w.position[1]);
-                let wheel_world = pos + rot * wp;
-                let steer_angle = w.steer_angle + angle;
+            // wheels
+            let mut tele: ffi::lcc_telemetry_t = mem::zeroed();
+            ffi::lcc_car_get_telemetry(self.car, &mut tele);
 
-                draw_wheel(&painter, &to_screen, wheel_world, steer_angle, 0.7, 0.28, w);
+            for i in 0..4usize {
+                let wheel_world = Vec2::new(tele.wheels[i].patch_world_pos[0], tele.wheels[i].patch_world_pos[1]);
+                // approximate steer angle for visuals: body yaw + input steer fraction
+                let steer_max = self.desc.steering.max_steer_deg * (PI as f32 / 180.0);
+                let steer_angle = if self.desc.wheels[i].steerable != 0 { self.controls.steer * steer_max } else { 0.0 };
+                let angle = yaw + steer_angle;
+                draw_wheel_vis(
+                    &painter,
+                    &|w| to_screen_point(w, self.camera_pos, self.zoom, center),
+                    wheel_world,
+                    angle,
+                    self.desc.wheels[i].radius_m * 2.0,
+                    self.desc.wheels[i].width_m,
+                    &tele.wheels[i],
+                );
             }
         }
     }
 
     fn draw_config_editor(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Car setup");
+        ui.heading("Car setup (runtime & recreate)");
         ui.separator();
 
         ui.horizontal(|ui| {
-            if ui.button("Apply to car").clicked() {
-                unsafe { self.config.apply_to_car(&mut self.car) }
+            if ui.button("Apply runtime fields").clicked() {
+                self.config.apply_runtime(self.car, &mut self.desc, &mut self.env);
             }
-            if ui.button("Read from car").clicked() {
-                unsafe { self.config = CarConfig::from_car(&self.car) }
+            if ui.button("Recreate car from editor").clicked() {
+                // copy editor -> desc and recreate
+                // General
+                self.desc.chassis.mass_kg = self.config.car.mass_kg;
+                self.desc.chassis.wheelbase_m = self.config.car.wheelbase;
+                self.desc.chassis.track_front_m = self.config.car.track_front;
+                self.desc.chassis.track_rear_m = self.config.car.track_rear;
+                self.desc.chassis.cg_height_m = self.config.car.cg_height;
+                self.desc.driveline.layout = self.config.car.layout;
+                self.desc.transmission.final_drive_ratio = self.config.car.final_drive;
+
+                self.desc.aero.drag_coefficient = self.config.car.cd;
+                self.desc.aero.frontal_area_m2 = self.config.car.frontal_area;
+                self.desc.aero.lift_coefficient_front = self.config.car.cl_front;
+                self.desc.aero.lift_coefficient_rear = self.config.car.cl_rear;
+
+                self.desc.steering.max_steer_deg = self.config.car.max_steer_deg;
+                self.desc.steering.ackermann_factor = self.config.car.ackermann;
+
+                // Wheels/tires geometry
+                for i in 0..4 {
+                    self.desc.wheels[i].position_local[0] = self.config.wheels[i].pos_x;
+                    self.desc.wheels[i].position_local[1] = self.config.wheels[i].pos_y;
+                    self.desc.wheels[i].steerable = if self.config.wheels[i].steerable { 1 } else { 0 };
+                    self.desc.wheels[i].driven = if self.config.wheels[i].driven { 1 } else { 0 };
+                    self.desc.wheels[i].radius_m = self.config.tires[i].radius_m;
+                    self.desc.wheels[i].width_m = self.config.tires[i].width_m;
+
+                    self.desc.tires[i].mu_nominal = self.config.tires[i].mu_nominal;
+                    self.desc.tires[i].pressure_kpa = self.config.tires[i].pressure_kpa;
+                    self.desc.tires[i].rolling_resistance = self.config.tires[i].rolling_resistance;
+                    self.desc.tires[i].load_sensitivity = self.config.tires[i].load_sens;
+                }
+
+                unsafe { self.recreate_from_desc(); }
             }
         });
 
         ui.separator();
+        egui::CollapsingHeader::new("General").default_open(true).show(ui, |ui| {
+            egui::Grid::new("car_grid").num_columns(2).striped(true).show(ui, |ui| {
+                ui.label("Mass (kg)");
+                ui.add(egui::DragValue::new(&mut self.config.car.mass_kg).speed(1.0)); ui.end_row();
+                ui.label("Wheelbase (m)");
+                if ui.add(egui::DragValue::new(&mut self.config.car.wheelbase).speed(0.01)).changed() {
+                    let half_wb = self.config.car.wheelbase * 0.5;
+                    self.config.wheels[0].pos_x =  half_wb;
+                    self.config.wheels[1].pos_x =  half_wb;
+                    self.config.wheels[2].pos_x = -half_wb;
+                    self.config.wheels[3].pos_x = -half_wb;
+                } ui.end_row();
+                ui.label("Track front (m)");
+                if ui.add(egui::DragValue::new(&mut self.config.car.track_front).speed(0.01)).changed() {
+                    let hf = self.config.car.track_front * 0.5;
+                    self.config.wheels[0].pos_y =  hf;
+                    self.config.wheels[1].pos_y = -hf;
+                } ui.end_row();
+                ui.label("Track rear (m)");
+                if ui.add(egui::DragValue::new(&mut self.config.car.track_rear).speed(0.01)).changed() {
+                    let hr = self.config.car.track_rear * 0.5;
+                    self.config.wheels[2].pos_y =  hr;
+                    self.config.wheels[3].pos_y = -hr;
+                } ui.end_row();
+                ui.label("CG height (m)");
+                ui.add(egui::DragValue::new(&mut self.config.car.cg_height).speed(0.005)); ui.end_row();
+                ui.label("Final drive");
+                ui.add(egui::DragValue::new(&mut self.config.car.final_drive).speed(0.01)); ui.end_row();
 
-        egui::CollapsingHeader::new("General")
-            .default_open(true)
-            .show(ui, |ui| {
-                egui::Grid::new("car_grid")
-                    .num_columns(2)
-                    .striped(true)
-                    .show(ui, |ui| {
-                        ui.label("Mass (kg)");
-                        ui.add(egui::DragValue::new(&mut self.config.car.mass).speed(1.0));
-                        ui.end_row();
-                        ui.label("Inertia (<=0 auto)");
-                        ui.add(egui::DragValue::new(&mut self.config.car.inertia).speed(1.0));
-                        ui.end_row();
-                        ui.label("Wheelbase (m)");
-                        if ui
-                            .add(egui::DragValue::new(&mut self.config.car.wheelbase).speed(0.01))
-                            .changed()
-                        {
-                            let wb = self.config.car.wheelbase;
-                            let tw = self.config.car.track_width;
-                            let half_wb = wb * 0.5;
-                            let half_tw = tw * 0.5;
-                            self.config.wheels[0].pos_x = half_wb;
-                            self.config.wheels[1].pos_x = half_wb;
-                            self.config.wheels[2].pos_x = -half_wb;
-                            self.config.wheels[3].pos_x = -half_wb;
-                            self.config.wheels[0].pos_y = half_tw;
-                            self.config.wheels[1].pos_y = -half_tw;
-                            self.config.wheels[2].pos_y = half_tw;
-                            self.config.wheels[3].pos_y = -half_tw;
-                        }
-                        ui.end_row();
-                        ui.label("Track width (m)");
-                        if ui
-                            .add(egui::DragValue::new(&mut self.config.car.track_width).speed(0.01))
-                            .changed()
-                        {
-                            let wb = self.config.car.wheelbase;
-                            let tw = self.config.car.track_width;
-                            let half_wb = wb * 0.5;
-                            let half_tw = tw * 0.5;
-                            self.config.wheels[0].pos_x = half_wb;
-                            self.config.wheels[1].pos_x = half_wb;
-                            self.config.wheels[2].pos_x = -half_wb;
-                            self.config.wheels[3].pos_x = -half_wb;
-                            self.config.wheels[0].pos_y = half_tw;
-                            self.config.wheels[1].pos_y = -half_tw;
-                            self.config.wheels[2].pos_y = half_tw;
-                            self.config.wheels[3].pos_y = -half_tw;
-                        }
-                        ui.end_row();
-                        ui.label("CG height (m)");
-                        ui.add(egui::DragValue::new(&mut self.config.car.cg_height).speed(0.005));
-                        ui.end_row();
-                        ui.label("CG position (0..1)");
-                        ui.add(egui::DragValue::new(&mut self.config.car.cg_position).speed(0.005));
-                        ui.end_row();
-                        ui.label("Front brake bias");
-                        ui.add(
-                            egui::DragValue::new(&mut self.config.car.front_brake_bias)
-                                .speed(0.005),
-                        );
-                        ui.end_row();
-                        ui.label("Max brake torque (Nm)");
-                        ui.add(
-                            egui::DragValue::new(&mut self.config.car.max_brake_torque).speed(10.0),
-                        );
-                        ui.end_row();
-                        ui.label("Air density");
-                        ui.add(egui::DragValue::new(&mut self.config.car.air_density).speed(0.01));
-                        ui.end_row();
-                        ui.label("Ambient temp (C)");
-                        ui.add(egui::DragValue::new(&mut self.config.car.ambient_temp).speed(0.5));
-                        ui.end_row();
-                        ui.label("Surface friction");
-                        ui.add(
-                            egui::DragValue::new(&mut self.config.car.surface_friction).speed(0.01),
-                        );
-                        ui.end_row();
-                    });
-            });
-
-        egui::CollapsingHeader::new("Engine")
-            .default_open(false)
-            .show(ui, |ui| {
-                egui::Grid::new("engine_grid")
-                    .num_columns(2)
-                    .striped(true)
-                    .show(ui, |ui| {
-                        macro_rules! row {
-                            ($label:expr, $field:expr, $spd:expr) => {{
-                                ui.label($label);
-                                ui.add(egui::DragValue::new(&mut $field).speed($spd));
-                                ui.end_row();
-                            }};
-                        }
-                        row!("Max power (W)", self.config.engine.max_power, 50.0);
-                        row!("Max torque (Nm)", self.config.engine.max_torque, 1.0);
-                        row!("Idle RPM", self.config.engine.idle_rpm, 10.0);
-                        row!("Max RPM", self.config.engine.max_rpm, 10.0);
-                        row!("Redline RPM", self.config.engine.redline_rpm, 10.0);
-                        row!("Inertia", self.config.engine.inertia, 0.005);
-                        row!("Friction", self.config.engine.friction, 0.001);
-                        row!("Response time (s)", self.config.engine.response_time, 0.005);
-                        row!("Peak torque RPM", self.config.engine.peak_torque_rpm, 10.0);
-                        row!("Peak power RPM", self.config.engine.peak_power_rpm, 10.0);
-                        row!(
-                            "Engine brake coeff",
-                            self.config.engine.engine_brake_coeff,
-                            0.001
-                        );
-                        row!(
-                            "Friction quadratic",
-                            self.config.engine.friction_quadratic,
-                            1e-5
-                        );
-                        row!("Idle torque", self.config.engine.idle_torque, 0.5);
-                        row!("Stall RPM", self.config.engine.stall_rpm, 10.0);
-                    });
-            });
-
-        egui::CollapsingHeader::new("Transmission")
-            .default_open(false)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Drive type");
-                    egui::ComboBox::from_id_salt("drive_type")
-                        .selected_text(&self.config.trans.drive_type)
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                &mut self.config.trans.drive_type,
-                                "RWD".into(),
-                                "RWD",
-                            );
-                            ui.selectable_value(
-                                &mut self.config.trans.drive_type,
-                                "FWD".into(),
-                                "FWD",
-                            );
-                            ui.selectable_value(
-                                &mut self.config.trans.drive_type,
-                                "AWD".into(),
-                                "AWD",
-                            );
-                        });
+                ui.label("Layout");
+                egui::ComboBox::from_id_salt("layout").selected_text(match self.config.car.layout {
+                    x if x == LCC_LAYOUT_FWD => "FWD",
+                    x if x == LCC_LAYOUT_RWD => "RWD",
+                    x if x == LCC_LAYOUT_AWD => "AWD",
+                    x if x == LCC_LAYOUT_4X4 => "4x4",
+                    _ => "FWD",
+                }).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.config.car.layout, LCC_LAYOUT_FWD, "FWD");
+                    ui.selectable_value(&mut self.config.car.layout, LCC_LAYOUT_RWD, "RWD");
+                    ui.selectable_value(&mut self.config.car.layout, LCC_LAYOUT_AWD, "AWD");
+                    ui.selectable_value(&mut self.config.car.layout, LCC_LAYOUT_4X4, "4x4");
                 });
-                ui.add(
-                    egui::Slider::new(&mut self.config.trans.num_gears, 0..=8).text("Num gears"),
-                );
-                while self.config.trans.gear_ratios.len() < self.config.trans.num_gears as usize {
-                    self.config.trans.gear_ratios.push(1.0);
-                }
-                while self.config.trans.gear_ratios.len() > self.config.trans.num_gears as usize {
-                    self.config.trans.gear_ratios.pop();
-                }
-                for i in 0..self.config.trans.gear_ratios.len() {
-                    ui.horizontal(|ui| {
-                        ui.label(format!("Gear {} ratio", i + 1));
-                        ui.add(
-                            egui::DragValue::new(&mut self.config.trans.gear_ratios[i]).speed(0.01),
-                        );
-                    });
-                }
-                ui.separator();
-                egui::Grid::new("trans_grid")
-                    .num_columns(2)
-                    .striped(true)
-                    .show(ui, |ui| {
-                        ui.label("Final drive");
-                        ui.add(
-                            egui::DragValue::new(&mut self.config.trans.final_drive).speed(0.01),
-                        );
-                        ui.end_row();
-                        ui.label("Reverse ratio");
-                        ui.add(
-                            egui::DragValue::new(&mut self.config.trans.reverse_ratio).speed(0.01),
-                        );
-                        ui.end_row();
-                        ui.label("Efficiency");
-                        ui.add(egui::DragValue::new(&mut self.config.trans.efficiency).speed(0.01));
-                        ui.end_row();
-                    });
-            });
+                ui.end_row();
 
-        egui::CollapsingHeader::new("Differential")
-            .default_open(false)
-            .show(ui, |ui| {
-                egui::Grid::new("diff_grid")
-                    .num_columns(2)
-                    .striped(true)
-                    .show(ui, |ui| {
-                        ui.label("Preload (Nm)");
-                        ui.add(egui::DragValue::new(&mut self.config.diff.preload).speed(1.0));
-                        ui.end_row();
-                        ui.label("Power factor");
-                        ui.add(
-                            egui::DragValue::new(&mut self.config.diff.power_factor).speed(0.01),
-                        );
-                        ui.end_row();
-                        ui.label("Coast factor");
-                        ui.add(
-                            egui::DragValue::new(&mut self.config.diff.coast_factor).speed(0.01),
-                        );
-                        ui.end_row();
-                        ui.label("Viscous coeff");
-                        ui.add(
-                            egui::DragValue::new(&mut self.config.diff.viscous_coefficient)
-                                .speed(0.1),
-                        );
-                        ui.end_row();
-                        ui.label("Bias limit (Nm)");
-                        ui.add(egui::DragValue::new(&mut self.config.diff.bias_limit).speed(1.0));
-                        ui.end_row();
-                    });
-            });
+                ui.label("Cd");
+                ui.add(egui::DragValue::new(&mut self.config.car.cd).speed(0.005)); ui.end_row();
+                ui.label("Frontal area (m^2)");
+                ui.add(egui::DragValue::new(&mut self.config.car.frontal_area).speed(0.01)); ui.end_row();
+                ui.label("Cl front");
+                ui.add(egui::DragValue::new(&mut self.config.car.cl_front).speed(0.01)); ui.end_row();
+                ui.label("Cl rear");
+                ui.add(egui::DragValue::new(&mut self.config.car.cl_rear).speed(0.01)); ui.end_row();
 
-        egui::CollapsingHeader::new("Aerodynamics")
-            .default_open(false)
-            .show(ui, |ui| {
-                egui::Grid::new("aero_grid")
-                    .num_columns(2)
-                    .striped(true)
-                    .show(ui, |ui| {
-                        ui.label("Cd");
-                        ui.add(
-                            egui::DragValue::new(&mut self.config.aero.drag_coefficient)
-                                .speed(0.005),
-                        );
-                        ui.end_row();
-                        ui.label("Frontal area (m^2)");
-                        ui.add(
-                            egui::DragValue::new(&mut self.config.aero.frontal_area).speed(0.01),
-                        );
-                        ui.end_row();
-                        ui.label("Cl (downforce)");
-                        ui.add(
-                            egui::DragValue::new(&mut self.config.aero.downforce_coefficient)
-                                .speed(0.01),
-                        );
-                        ui.end_row();
-                        ui.label("Downforce area (m^2)");
-                        ui.add(
-                            egui::DragValue::new(&mut self.config.aero.downforce_area).speed(0.01),
-                        );
-                        ui.end_row();
-                        ui.label("Aero balance front (0..1)");
-                        ui.add(
-                            egui::DragValue::new(&mut self.config.aero.aero_balance_front)
-                                .speed(0.01),
-                        );
-                        ui.end_row();
-                    });
-            });
+                ui.label("Max steer (deg)");
+                ui.add(egui::DragValue::new(&mut self.config.car.max_steer_deg).speed(0.1)); ui.end_row();
+                ui.label("Ackermann");
+                ui.add(egui::DragValue::new(&mut self.config.car.ackermann).speed(0.01)); ui.end_row();
 
-        egui::CollapsingHeader::new("Tires")
-            .default_open(false)
-            .show(ui, |ui| {
-                for i in 0..4 {
-                    egui::CollapsingHeader::new(format!("Tire {}", i)).show(ui, |ui| {
-                        let t = &mut self.config.tires[i];
-                        egui::Grid::new(format!("tire_grid_{i}"))
-                            .num_columns(2)
-                            .striped(true)
-                            .show(ui, |ui| {
-                                macro_rules! g {
-                                    ($a:expr,$b:expr,$s:expr) => {{
-                                        ui.label($a);
-                                        ui.add(egui::DragValue::new(&mut $b).speed($s));
-                                        ui.end_row();
-                                    }};
-                                }
-                                g!("Radius (m)", t.radius, 0.001);
-                                g!("Width (m)", t.width, 0.001);
-                                g!("Aspect ratio", t.aspect_ratio, 0.005);
-                                g!("Pressure (kPa)", t.pressure, 0.5);
-                                g!("Nominal load (N)", t.nominal_load, 5.0);
-                                g!("Peak friction", t.peak_friction, 0.005);
-                                g!("Slip friction", t.slip_friction, 0.005);
-                                g!("Long stiffness", t.stiffness, 10.0);
-                                g!("Cornering stiffness", t.cornering_stiffness, 10.0);
-                                g!("Camber stiffness", t.camber_stiffness, 10.0);
-                                g!("Rolling resistance", t.rolling_resistance, 0.0001);
-                                g!("Relax length long (m)", t.relax_length_long, 0.005);
-                                g!("Relax length lat (m)", t.relax_length_lat, 0.005);
-                                g!("Load sensitivity", t.load_sensitivity, 0.005);
-                                g!("mu_min", t.mu_min, 0.005);
-                                g!("mu_max", t.mu_max, 0.005);
-                            });
-                    });
-                }
+                ui.label("Global μ scale");
+                ui.add(egui::DragValue::new(&mut self.config.car.global_mu).speed(0.01)); ui.end_row();
             });
+        });
 
-        egui::CollapsingHeader::new("Wheels")
-            .default_open(false)
-            .show(ui, |ui| {
-                for i in 0..4 {
-                    egui::CollapsingHeader::new(format!("Wheel {}", i)).show(ui, |ui| {
-                        let w = &mut self.config.wheels[i];
-                        egui::Grid::new(format!("wheel_grid_{i}"))
-                            .num_columns(2)
-                            .striped(true)
-                            .show(ui, |ui| {
-                                ui.label("Pos X (m)");
-                                ui.add(egui::DragValue::new(&mut w.pos_x).speed(0.005));
-                                ui.end_row();
-                                ui.label("Pos Y (m)");
-                                ui.add(egui::DragValue::new(&mut w.pos_y).speed(0.005));
-                                ui.end_row();
-                                ui.label("Rot inertia");
-                                ui.add(
-                                    egui::DragValue::new(&mut w.rotational_inertia).speed(0.005),
-                                );
-                                ui.end_row();
-                                ui.label("Camber (rad)");
-                                ui.add(egui::DragValue::new(&mut w.camber_angle).speed(0.001));
-                                ui.end_row();
-                                ui.label("Surface μ");
-                                ui.add(egui::DragValue::new(&mut w.surface_friction).speed(0.005));
-                                ui.end_row();
-                            });
+        egui::CollapsingHeader::new("Tires & wheels").default_open(false).show(ui, |ui| {
+            for i in 0..4 {
+                egui::CollapsingHeader::new(format!("Wheel {}", i)).show(ui, |ui| {
+                    egui::Grid::new(format!("wheel_grid_{i}")).num_columns(2).striped(true).show(ui, |ui| {
+                        ui.label("Pos X (m)"); ui.add(egui::DragValue::new(&mut self.config.wheels[i].pos_x).speed(0.005)); ui.end_row();
+                        ui.label("Pos Y (m)"); ui.add(egui::DragValue::new(&mut self.config.wheels[i].pos_y).speed(0.005)); ui.end_row();
+                        ui.label("Steerable"); ui.checkbox(&mut self.config.wheels[i].steerable, ""); ui.end_row();
+                        ui.label("Driven"); ui.checkbox(&mut self.config.wheels[i].driven, ""); ui.end_row();
+
+                        ui.label("Tire radius (m)"); ui.add(egui::DragValue::new(&mut self.config.tires[i].radius_m).speed(0.001)); ui.end_row();
+                        ui.label("Tire width (m)"); ui.add(egui::DragValue::new(&mut self.config.tires[i].width_m).speed(0.001)); ui.end_row();
+                        ui.label("μ nominal"); ui.add(egui::DragValue::new(&mut self.config.tires[i].mu_nominal).speed(0.005)); ui.end_row();
+                        ui.label("Pressure (kPa)"); ui.add(egui::DragValue::new(&mut self.config.tires[i].pressure_kpa).speed(0.5)); ui.end_row();
+                        ui.label("Rolling resistance"); ui.add(egui::DragValue::new(&mut self.config.tires[i].rolling_resistance).speed(0.0005)); ui.end_row();
+                        ui.label("Load sensitivity"); ui.add(egui::DragValue::new(&mut self.config.tires[i].load_sens).speed(0.0005)); ui.end_row();
                     });
-                }
-            });
+                });
+            }
+        });
     }
 
     fn draw_side_panel(&mut self, ui: &mut egui::Ui) {
@@ -1375,9 +955,7 @@ impl App {
             ui.label(format!("v{}", *VERSION));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Reset").clicked() {
-                    unsafe {
-                        self.reset();
-                    }
+                    unsafe { self.reset(); }
                 }
             });
         });
@@ -1391,179 +969,96 @@ impl App {
                 }
             });
         if ui.button("Apply Preset").clicked() {
-            unsafe {
-                self.reset();
-            }
+            unsafe { self.reset(); }
         }
 
         ui.add(egui::Slider::new(&mut self.sim_speed, 0.1..=4.0).text("Sim speed"));
         ui.horizontal(|ui| {
             if ui.toggle_value(&mut self.paused, "Pause").clicked() {}
             if ui.button("Step").clicked() {
-                unsafe {
-                    self.fixed_update(self.fixed_dt);
-                }
+                unsafe { self.fixed_update(self.fixed_dt); }
             }
         });
         ui.checkbox(&mut self.follow_camera, "Follow camera");
         ui.add(egui::Slider::new(&mut self.zoom, 8.0..=120.0).text("Zoom"));
 
         ui.separator();
-
         unsafe {
-            let rpm = ffi::lcc_car_get_engine_rpm(&self.car);
-            let speed = ffi::lcc_car_get_speed(&self.car);
-            let gear = self.car.transmission.current_gear;
-            ui.label(format!("Speed: {:6.1} km/h", speed));
-            ui.label(format!("Engine RPM: {:6.0}", rpm));
-            ui.label(format!("Gear: {}", gear));
-            ui.label(format!("Yaw: {:5.2} rad", self.car.angle));
+            let mut tele: ffi::lcc_telemetry_t = mem::zeroed();
+            ffi::lcc_car_get_telemetry(self.car, &mut tele);
+            ui.label(format!("Speed: {:6.1} km/h", tele.car.speed_mps * 3.6));
+            ui.label(format!("Engine RPM: {:6.0}", tele.engine.rpm));
+            ui.label(format!("Gear: {}", tele.transmission.gear_index));
+            ui.label(format!("Yaw: {:5.2} rad", tele.car.yaw_rad));
         }
 
         ui.separator();
-
         ui.collapsing("Controls", |ui| {
-    ui.monospace("a/d = steer\nw/s = shift\nh = clutch\nj = brake\nk = throttle\nSpace = hold START\n(Ignition OFF/RUN via UI)");
-});
+            ui.monospace("a/d = steer\nw/s = shift\nh = clutch\nj = brake\nk = throttle\nSpace = hold START (ign ON)");
+        });
+
         ui.separator();
-        ui.collapsing("Ignition & Electrics", |ui| {
-            // Key selector (OFF/RUN). START is momentary via Space.
-            ui.horizontal(|ui| {
-                ui.label("Key:");
-                let mut choose = |label: &str, v| {
-                    ui.selectable_value(&mut self.key_pos_ui, v, label);
-                };
-                choose("OFF", ffi::lcc_key_state_t_LCC_KEY_OFF);
-                choose("RUN", ffi::lcc_key_state_t_LCC_KEY_RUN);
-                ui.label("(hold Space = START)");
-            });
-
-            // Accessory load slider (applies every frame)
-            ui.add(
-                egui::Slider::new(&mut self.accessory_load_watts, 0.0..=700.0)
-                    .text("Accessory load (W)"),
-            );
-
-            unsafe {
-                let batt_v = ffi::lcc_car_get_battery_voltage(&self.car);
-                let soc = ffi::lcc_car_get_battery_soc(&self.car);
-                ui.label(format!(
-                    "Battery: {:4.2} V  |  SOC: {:3.0}%",
-                    batt_v,
-                    soc * 100.0
-                ));
-                ui.label(format!(
-                    "Electrical load: {:5.0} W",
-                    self.car.electrical_load_W
-                ));
-                ui.label(format!(
-                    "Alternator out: {:5.0} W",
-                    self.car.alternator_out_W
-                ));
-
-                let eng_state = match self.car.engine.state {
-                    0 => "OFF",
-                    1 => "CRANKING",
-                    2 => "RUNNING",
-                    _ => "?",
-                };
-                let fuelcut = self.car.engine.fuel_cut_active != 0;
-                let sparkcut = self.car.engine.spark_cut_active != 0;
-                ui.label(format!(
-                    "Engine: {} {} {}",
-                    eng_state,
-                    if fuelcut { "[FuelCut]" } else { " " },
-                    if sparkcut { "[SparkCut]" } else { " " },
-                ));
+        ui.collapsing("Driver Aids", |ui| {
+            let mut changed = false;
+            changed |= ui.checkbox(&mut self.abs_on, "ABS").changed();
+            changed |= ui.checkbox(&mut self.tc_on, "TC").changed();
+            changed |= ui.checkbox(&mut self.esc_on, "ESC").changed();
+            if changed {
+                unsafe {
+                    ffi::lcc_car_set_abs(self.car, if self.abs_on { LCC_ABS_ON } else { LCC_ABS_OFF });
+                    ffi::lcc_car_set_tc(self.car, if self.tc_on { LCC_TC_ON } else { LCC_TC_OFF });
+                    ffi::lcc_car_set_esc(self.car, if self.esc_on { LCC_ESC_ON } else { ffi::lcc_esc_mode_e_LCC_ESC_OFF });
+                }
             }
         });
 
         ui.separator();
-        ui.collapsing("Fuel", |ui| unsafe {
-            let cap = ffi::lcc_car_get_fuel_capacity_L(&self.car);
-            let mut lvl = ffi::lcc_car_get_fuel_level_L(&self.car);
+        ui.collapsing("Fuel / Electrics", |ui| unsafe {
+            let mut tele: ffi::lcc_telemetry_t = mem::zeroed();
+            ffi::lcc_car_get_telemetry(self.car, &mut tele);
+            let cap = self.desc.fuel.tank_capacity_l;
+            let lvl = tele.fuel.fuel_l;
             ui.label(format!("Fuel: {:5.1} / {:5.1} L", lvl, cap));
             ui.horizontal(|ui| {
                 if ui.button("Refill full").clicked() {
-                    ffi::lcc_car_set_fuel_level(&mut self.car, cap);
+                    let _ = ffi::lcc_car_set_fuel(self.car, cap);
                 }
                 if ui.button("+5 L").clicked() {
-                    ffi::lcc_car_refuel(&mut self.car, 5.0);
+                    let _ = ffi::lcc_car_refuel(self.car, 5.0);
                 }
             });
-            if ui
-                .add(egui::Slider::new(&mut lvl, 0.0..=cap).text("Set level (L)"))
-                .changed()
-            {
-                ffi::lcc_car_set_fuel_level(&mut self.car, lvl);
-            }
+            ui.label(format!("Battery: {:4.2} V  |  SOC: {:3.0}%",
+                tele.electrics.battery_voltage_v, tele.electrics.battery_soc*100.0));
         });
-        ui.separator();
-        ui.collapsing("Visuals", |ui| {
-            ui.checkbox(&mut self.show_trace, "Show path trace");
-            ui.checkbox(&mut self.show_skids, "Show skid marks");
-            ui.add(
-                egui::Slider::new(&mut self.trace_point_spacing_m, 0.05..=1.0)
-                    .text("Trace spacing (m)"),
-            );
-            ui.horizontal(|ui| {
-                if ui.button("Clear traces").clicked() {
-                    self.path_trace.clear();
-                    self.skid_segments.clear();
-                }
-            });
-            ui.add(
-                egui::Slider::new(&mut self.slip_ratio_threshold, 0.05..=0.5)
-                    .text("Skid slip ratio threshold"),
-            );
-            ui.add(
-                egui::Slider::new(&mut self.slip_angle_threshold, 0.05..=0.5)
-                    .text("Skid slip angle threshold (rad)"),
-            );
-            ui.add(
-                egui::Slider::new(&mut self.min_speed_for_skid_kmh, 0.0..=40.0)
-                    .text("Min speed for skids (km/h)"),
-            );
-            ui.add(egui::Slider::new(&mut self.skid_ttl, 1.0..=12.0).text("Skid mark fade (s)"));
-        });
+
         ui.separator();
         ui.collapsing("Telemetry", |ui| {
             ui.horizontal(|ui| {
                 if ui
-                    .button(if self.telemetry.recording {
-                        "Stop recording"
-                    } else {
-                        "Start recording"
-                    })
+                    .button(if self.telemetry_rec.recording { "Stop recording" } else { "Start recording" })
                     .clicked()
                 {
-                    self.telemetry.recording = !self.telemetry.recording;
+                    self.telemetry_rec.recording = !self.telemetry_rec.recording;
                 }
                 if ui.button("Clear").clicked() {
-                    self.telemetry.clear();
+                    self.telemetry_rec.clear();
                 }
             });
             if ui.button("Export CSV").clicked() {
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("CSV", &["csv"])
-                    .save_file()
-                {
-                    if let Err(e) = self.telemetry.export_csv(&path) {
+                if let Some(path) = rfd::FileDialog::new().add_filter("CSV", &["csv"]).save_file() {
+                    if let Err(e) = self.telemetry_rec.export_csv(&path) {
                         eprintln!("CSV export failed: {e:?}");
                     }
                 }
             }
             if ui.button("Export JSON").clicked() {
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("JSON", &["json"])
-                    .save_file()
-                {
-                    if let Err(e) = self.telemetry.export_json(&path) {
+                if let Some(path) = rfd::FileDialog::new().add_filter("JSON", &["json"]).save_file() {
+                    if let Err(e) = self.telemetry_rec.export_json(&path) {
                         eprintln!("JSON export failed: {e:?}");
                     }
                 }
             }
-            ui.label(format!("Samples: {}", self.telemetry.data.len()));
+            ui.label(format!("Samples: {}", self.telemetry_rec.data.len()));
         });
 
         ui.separator();
@@ -1580,7 +1075,6 @@ impl App {
                     StripBuilder::new(ui)
                         .sizes(Size::relative(0.5), 2)
                         .horizontal(|mut hstrip| {
-                            // Left: RPM/Speed
                             hstrip.cell(|ui| {
                                 let col_h = ui.available_height();
                                 let half = (col_h - 6.0) * 0.5;
@@ -1590,14 +1084,9 @@ impl App {
                                     .height(half)
                                     .show(ui, |pui| {
                                         let pts = PlotPoints::from_iter(
-                                            self.plots
-                                                .rpm
-                                                .iter()
-                                                .map(|&(x, y)| [x as f64, y as f64]),
+                                            self.plots.rpm.iter().map(|&(x, y)| [x as f64, y as f64]),
                                         );
-                                        pui.line(
-                                            Line::new("RPM", pts).color(Color32::LIGHT_YELLOW),
-                                        );
+                                        pui.line(Line::new("RPM", pts).color(Color32::LIGHT_YELLOW));
                                     });
 
                                 Plot::new("speed_plot")
@@ -1605,24 +1094,17 @@ impl App {
                                     .height(half)
                                     .show(ui, |pui| {
                                         let pts = PlotPoints::from_iter(
-                                            self.plots
-                                                .speed
-                                                .iter()
-                                                .map(|&(x, y)| [x as f64, y as f64]),
+                                            self.plots.speed.iter().map(|&(x, y)| [x as f64, y as f64]),
                                         );
-                                        pui.line(
-                                            Line::new("Speed (km/h)", pts)
-                                                .color(Color32::LIGHT_GREEN),
-                                        );
+                                        pui.line(Line::new("Speed (km/h)", pts).color(Color32::LIGHT_GREEN));
                                     });
                             });
 
-                            // Right: Inputs + Slip ratios
                             hstrip.cell(|ui| {
                                 let col_h = ui.available_height();
                                 let half = (col_h - 6.0) * 0.5;
 
-                                Plot::new("inputs_plot")
+                                Plot::new("omega_plot")
                                     .legend(Legend::default())
                                     .height(half)
                                     .show(ui, |pui| {
@@ -1634,14 +1116,9 @@ impl App {
                                         ];
                                         for i in 0..4 {
                                             let pts = PlotPoints::from_iter(
-                                                self.plots.wheel_omega[i]
-                                                    .iter()
-                                                    .map(|&(x, y)| [x as f64, y as f64]),
+                                                self.plots.wheel_omega[i].iter().map(|&(x, y)| [x as f64, y as f64]),
                                             );
-                                            pui.line(
-                                                Line::new(format!("W{i} omega"), pts)
-                                                    .color(colors[i]),
-                                            );
+                                            pui.line(Line::new(format!("W{i} ω (rad/s)"), pts).color(colors[i]));
                                         }
                                     });
 
@@ -1650,21 +1127,16 @@ impl App {
                                     .height(half)
                                     .show(ui, |pui| {
                                         let colors = [
-                                            Color32::from_rgb(255, 80, 80),   // FL
-                                            Color32::from_rgb(255, 150, 50),  // FR
-                                            Color32::from_rgb(50, 200, 255),  // RL
-                                            Color32::from_rgb(180, 120, 255), // RR
+                                            Color32::from_rgb(255, 80, 80),
+                                            Color32::from_rgb(255, 150, 50),
+                                            Color32::from_rgb(50, 200, 255),
+                                            Color32::from_rgb(180, 120, 255),
                                         ];
                                         for i in 0..4 {
                                             let pts = PlotPoints::from_iter(
-                                                self.plots.slip_ratios[i]
-                                                    .iter()
-                                                    .map(|&(x, y)| [x as f64, y as f64]),
+                                                self.plots.slip_ratios[i].iter().map(|&(x, y)| [x as f64, y as f64]),
                                             );
-                                            pui.line(
-                                                Line::new(format!("W{i} slip ratio"), pts)
-                                                    .color(colors[i]),
-                                            );
+                                            pui.line(Line::new(format!("W{i} slip ratio"), pts).color(colors[i]));
                                         }
                                         pui.hline(HLine::new("", 0.0).color(Color32::GRAY));
                                     });
@@ -1680,48 +1152,21 @@ impl App {
         let origin = Pos2::new(r.left() + 130.0, r.top() + 130.0);
 
         unsafe {
-            let rpm = ffi::lcc_car_get_engine_rpm(&self.car);
-            let redline = self.car.engine.redline_rpm.max(1.0);
+            let mut tele: ffi::lcc_telemetry_t = mem::zeroed();
+            ffi::lcc_car_get_telemetry(self.car, &mut tele);
+
+            let rpm = tele.engine.rpm;
+            let redline = self.desc.engine.redline_rpm.max(1.0);
             draw_rpm_gauge(&painter, origin, rpm, redline);
 
             let tb_origin = Pos2::new(origin.x + 160.0, origin.y - 60.0);
-            draw_bar(
-                &painter,
-                tb_origin,
-                "Throttle",
-                self.car.throttle_input,
-                Color32::LIGHT_GREEN,
-            );
-            draw_bar(
-                &painter,
-                Pos2::new(tb_origin.x, tb_origin.y + 24.0),
-                "Brake",
-                self.car.brake_input,
-                Color32::LIGHT_RED,
-            );
-            draw_bar(
-                &painter,
-                Pos2::new(tb_origin.x, tb_origin.y + 48.0),
-                "Clutch",
-                self.car.clutch_input,
-                Color32::LIGHT_BLUE,
-            );
-            draw_bar(
-                &painter,
-                Pos2::new(tb_origin.x, tb_origin.y + 72.0),
-                "Steer",
-                (self.car.steering_input + 1.0) / 2.0,
-                Color32::YELLOW,
-            );
+            draw_bar(&painter, tb_origin, "Throttle", self.controls.throttle, Color32::LIGHT_GREEN);
+            draw_bar(&painter, Pos2::new(tb_origin.x, tb_origin.y + 24.0), "Brake", self.controls.brake, Color32::LIGHT_RED);
+            draw_bar(&painter, Pos2::new(tb_origin.x, tb_origin.y + 48.0), "Clutch", self.controls.clutch, Color32::LIGHT_BLUE);
+            draw_bar(&painter, Pos2::new(tb_origin.x, tb_origin.y + 72.0), "Steer", (self.controls.steer + 1.0) / 2.0, Color32::YELLOW);
 
-            let gear = self.car.transmission.current_gear;
-            let gtxt = if gear == -1 {
-                "R".to_string()
-            } else if gear == 0 {
-                "N".to_string()
-            } else {
-                format!("{}", gear)
-            };
+            let gear = tele.transmission.gear_index;
+            let gtxt = if gear == 0 { "N".to_string() } else if gear == self.desc.transmission.gear_index_reverse { "R".to_string() } else { format!("{}", gear) };
             painter.text(
                 Pos2::new(origin.x - 60.0, origin.y + 70.0),
                 Align2::CENTER_CENTER,
@@ -1731,28 +1176,15 @@ impl App {
             );
 
             let base2 = Pos2::new(origin.x + 160.0, origin.y + 50.0);
-
-            // Fuel bar: L / capacity
-            let cap = ffi::lcc_car_get_fuel_capacity_L(&self.car);
-            let lvl = ffi::lcc_car_get_fuel_level_L(&self.car);
-            draw_bar(
-                &painter,
-                Pos2::new(base2.x, base2.y + 24.0),
-                "Fuel",
-                (lvl / cap).clamp(0.0, 1.0),
-                Color32::from_rgb(200, 180, 60),
-            );
+            let cap = self.desc.fuel.tank_capacity_l;
+            let lvl = tele.fuel.fuel_l;
+            draw_bar(&painter, Pos2::new(base2.x, base2.y + 24.0), "Fuel", (lvl / cap).clamp(0.0, 1.0), Color32::from_rgb(200, 180, 60));
 
             let base = Pos2::new(origin.x + 320.0, origin.y - 80.0);
             let labels = ["FL", "FR", "RL", "RR"];
             for i in 0..4 {
-                let w = &self.car.wheels[i];
-                draw_wheel_info(
-                    &painter,
-                    Pos2::new(base.x, base.y + i as f32 * 30.0),
-                    labels[i],
-                    w,
-                );
+                let w = &tele.wheels[i];
+                draw_wheel_info(&painter, Pos2::new(base.x, base.y + i as f32 * 30.0), labels[i], w);
             }
         }
     }
@@ -1760,50 +1192,38 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        unsafe {
-            self.step_sim(ctx);
-        }
+        unsafe { self.step_sim(ctx); }
 
-        egui::TopBottomPanel::bottom("bottom")
-            .resizable(true)
-            .show(ctx, |ui| {
-                self.draw_bottom_panel(ui);
-            });
+        egui::TopBottomPanel::bottom("bottom").resizable(true).show(ctx, |ui| {
+            self.draw_bottom_panel(ui);
+        });
 
-        egui::SidePanel::left("left")
-            .resizable(true)
-            .default_width(320.0)
-            .show(ctx, |ui| {
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false; 2])
-                    .show(ui, |ui| {
-                        self.draw_side_panel(ui);
-                    });
+        egui::SidePanel::left("left").resizable(true).default_width(360.0).show(ctx, |ui| {
+            egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
+                self.draw_side_panel(ui);
             });
+        });
 
-        egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(Color32::from_gray(30)))
-            .show(ctx, |ui| {
-                self.draw_world(ui);
-                self.draw_hud(ui);
-            });
+        egui::CentralPanel::default().frame(egui::Frame::NONE.fill(Color32::from_gray(30))).show(ctx, |ui| {
+            self.draw_world(ui);
+            self.draw_hud(ui);
+        });
 
         ctx.request_repaint();
     }
 }
 
-fn lerp(a: f32, b: f32, t: f32) -> f32 {
-    a + (b - a) * t.clamp(0.0, 1.0)
+fn to_screen_point(w: Vec2, cam: Vec2, zoom: f32, center: Pos2) -> Pos2 {
+    let rel = w - cam;
+    let screen = Vec2::new(rel.x * zoom, -rel.y * zoom);
+    Pos2::new(center.x + screen.x, center.y + screen.y)
 }
 
+fn lerp(a: f32, b: f32, t: f32) -> f32 { a + (b - a) * t.clamp(0.0, 1.0) }
 fn linear_approach(current: f32, target: f32, rate: f32, dt: f32) -> f32 {
     let diff = target - current;
     let step = rate * dt;
-    if diff.abs() <= step {
-        target
-    } else {
-        current + diff.signum() * step
-    }
+    if diff.abs() <= step { target } else { current + diff.signum() * step }
 }
 
 fn draw_grid(painter: &Painter, rect: Rect, cam: Vec2, zoom: f32) {
@@ -1811,7 +1231,6 @@ fn draw_grid(painter: &Painter, rect: Rect, cam: Vec2, zoom: f32) {
     let bold_color = Color32::from_gray(100);
     let step_world = 1.0;
     let step = step_world * zoom;
-
     let center = rect.center();
 
     let to_screen = |w: Vec2| -> Pos2 {
@@ -1831,30 +1250,18 @@ fn draw_grid(painter: &Painter, rect: Rect, cam: Vec2, zoom: f32) {
         let p0 = to_screen(Vec2::new(wx, cam.y - (end_y as f32 + 1.0)));
         let p1 = to_screen(Vec2::new(wx, cam.y + (end_y as f32 + 1.0)));
         let bold = wx.abs() < 0.01;
-        painter.line_segment(
-            [p0, p1],
-            Stroke::new(
-                if bold { 2.0 } else { 1.0 },
-                if bold { bold_color } else { grid_color },
-            ),
-        );
+        painter.line_segment([p0, p1], Stroke::new(if bold { 2.0 } else { 1.0 }, if bold { bold_color } else { grid_color }));
     }
     for gy in start_y..=end_y {
         let wy = gy as f32 * step_world + cam.y.round();
         let p0 = to_screen(Vec2::new(cam.x - (end_x as f32 + 1.0), wy));
         let p1 = to_screen(Vec2::new(cam.x + (end_x as f32 + 1.0), wy));
         let bold = wy.abs() < 0.01;
-        painter.line_segment(
-            [p0, p1],
-            Stroke::new(
-                if bold { 2.0 } else { 1.0 },
-                if bold { bold_color } else { grid_color },
-            ),
-        );
+        painter.line_segment([p0, p1], Stroke::new(if bold { 2.0 } else { 1.0 }, if bold { bold_color } else { grid_color }));
     }
 }
 
-unsafe fn draw_wheel(
+unsafe fn draw_wheel_vis(
     painter: &egui::Painter,
     to_screen: &dyn Fn(Vec2) -> Pos2,
     center: Vec2,
@@ -1875,39 +1282,25 @@ unsafe fn draw_wheel(
     ]
     .map(|local| center + rot * local);
 
-    let pts = vec![
-        to_screen(corners[0]),
-        to_screen(corners[1]),
-        to_screen(corners[2]),
-        to_screen(corners[3]),
-    ];
+    let pts = vec![to_screen(corners[0]), to_screen(corners[1]), to_screen(corners[2]), to_screen(corners[3])];
 
     let fill = Color32::from_black_alpha(40);
     let outline = Color32::from_gray(200);
-    painter.add(egui::Shape::convex_polygon(
-        pts,
-        fill,
-        Stroke::new(1.5, outline),
-    ));
+    painter.add(egui::Shape::convex_polygon(pts, fill, Stroke::new(1.5, outline)));
 
-    let slip_dir_local = Vec2::new(0.0, w.slip_angle.tan().clamp(-2.0, 2.0));
+    // slip vectors
+    let slip_dir_local = Vec2::new(0.0, w.slip_angle_rad.tan().clamp(-2.0, 2.0));
     let slip_world = center + rot * slip_dir_local * 0.6;
-    painter.line_segment(
-        [to_screen(center), to_screen(slip_world)],
-        Stroke::new(2.0, Color32::from_rgb(255, 140, 0)),
-    );
+    painter.line_segment([to_screen(center), to_screen(slip_world)], Stroke::new(2.0, Color32::from_rgb(255, 140, 0)));
 
     let long_dir = center + rot * Vec2::new(w.slip_ratio.clamp(-1.5, 1.5), 0.0) * 0.6;
-    painter.line_segment(
-        [to_screen(center), to_screen(long_dir)],
-        Stroke::new(2.0, Color32::from_rgb(0, 220, 180)),
-    );
+    painter.line_segment([to_screen(center), to_screen(long_dir)], Stroke::new(2.0, Color32::from_rgb(0, 220, 180)));
 
-    let temp = w.temperature;
-    let mu = w.surface_friction;
+    // heat-ish color dot
+    let temp = w.tire_temp_c;
     let color = Color32::from_rgb(
         ((temp.clamp(20.0, 150.0) - 20.0) / 130.0 * 255.0) as u8,
-        (mu.clamp(0.3, 1.3) * 200.0) as u8,
+        180,
         180,
     );
     painter.circle_filled(to_screen(center), 4.0, color);
@@ -1917,12 +1310,7 @@ fn draw_rpm_gauge(painter: &egui::Painter, origin: Pos2, rpm: f32, redline: f32)
     let radius = 60.0;
     let bg = Color32::from_gray(40);
 
-    painter.circle(
-        origin,
-        radius,
-        Color32::from_black_alpha(10),
-        Stroke::new(2.0, bg),
-    );
+    painter.circle(origin, radius, Color32::from_black_alpha(10), Stroke::new(2.0, bg));
 
     let start_angle = -0.75 * PI;
     let end_angle = 0.75 * PI;
@@ -1934,10 +1322,7 @@ fn draw_rpm_gauge(painter: &egui::Painter, origin: Pos2, rpm: f32, redline: f32)
             let tt = lerp(from_t, to_t, i as f32 / steps as f32);
             let ang = start_angle + (end_angle - start_angle) * tt;
             let r = radius - 4.0;
-            pts.push(Pos2::new(
-                origin.x + r * ang.cos(),
-                origin.y + r * ang.sin(),
-            ));
+            pts.push(Pos2::new(origin.x + r * ang.cos(), origin.y + r * ang.sin()));
         }
         painter.add(egui::Shape::line(pts, Stroke::new(width, col)));
     };
@@ -1950,11 +1335,7 @@ fn draw_rpm_gauge(painter: &egui::Painter, origin: Pos2, rpm: f32, redline: f32)
         let t = i as f32 / 8.0;
         let ang = start_angle + (end_angle - start_angle) * t;
         let r0 = radius - 2.0;
-        let r1 = if i % 2 == 0 {
-            radius - 12.0
-        } else {
-            radius - 8.0
-        };
+        let r1 = if i % 2 == 0 { radius - 12.0 } else { radius - 8.0 };
         let p0 = Pos2::new(origin.x + r0 * ang.cos(), origin.y + r0 * ang.sin());
         let p1 = Pos2::new(origin.x + r1 * ang.cos(), origin.y + r1 * ang.sin());
         painter.line_segment([p0, p1], Stroke::new(2.0, Color32::from_gray(120)));
@@ -1963,55 +1344,22 @@ fn draw_rpm_gauge(painter: &egui::Painter, origin: Pos2, rpm: f32, redline: f32)
     let t = (rpm / redline).clamp(0.0, 1.0);
     let needle_angle = start_angle + (end_angle - start_angle) * t;
     let needle_len = radius * 0.9;
-    let tip = Pos2::new(
-        origin.x + needle_len * needle_angle.cos(),
-        origin.y + needle_len * needle_angle.sin(),
-    );
+    let tip = Pos2::new(origin.x + needle_len * needle_angle.cos(), origin.y + needle_len * needle_angle.sin());
     painter.line_segment([origin, tip], Stroke::new(3.0, Color32::LIGHT_RED));
 
     let label = format!("{:5.0} rpm", rpm);
-    painter.text(
-        Pos2::new(origin.x, origin.y + radius + 14.0),
-        Align2::CENTER_CENTER,
-        label,
-        egui::FontId::proportional(14.0),
-        Color32::WHITE,
-    );
-    painter.text(
-        Pos2::new(origin.x, origin.y - radius - 16.0),
-        Align2::CENTER_CENTER,
-        format!("Redline: {:.0}", redline),
-        egui::FontId::proportional(12.0),
-        Color32::from_gray(180),
-    );
+    painter.text(Pos2::new(origin.x, origin.y + radius + 14.0), Align2::CENTER_CENTER, label, egui::FontId::proportional(14.0), Color32::WHITE);
+    painter.text(Pos2::new(origin.x, origin.y - radius - 16.0), Align2::CENTER_CENTER, format!("Redline: {:.0}", redline), egui::FontId::proportional(12.0), Color32::from_gray(180));
 }
 
 fn draw_bar(painter: &egui::Painter, pos: Pos2, label: &str, value01: f32, color: Color32) {
     let w = 140.0;
     let h = 16.0;
     let rect = Rect::from_min_size(pos, vec2(w, h));
-    painter.rect(
-        rect,
-        3.0,
-        Color32::from_black_alpha(20),
-        Stroke::new(1.0, Color32::from_gray(70)),
-        egui::StrokeKind::Inside,
-    );
+    painter.rect(rect, 3.0, Color32::from_black_alpha(20), Stroke::new(1.0, Color32::from_gray(70)), egui::StrokeKind::Inside);
     let fill = Rect::from_min_size(pos, vec2(w * value01.clamp(0.0, 1.0), h));
-    painter.rect(
-        fill,
-        3.0,
-        color.gamma_multiply(0.5),
-        Stroke::NONE,
-        egui::StrokeKind::Inside,
-    );
-    painter.text(
-        Pos2::new(rect.left() - 6.0, rect.center().y),
-        Align2::RIGHT_CENTER,
-        label,
-        egui::FontId::proportional(12.0),
-        Color32::GRAY,
-    );
+    painter.rect(fill, 3.0, color.gamma_multiply(0.5), Stroke::NONE, egui::StrokeKind::Inside);
+    painter.text(Pos2::new(rect.left() - 6.0, rect.center().y), Align2::RIGHT_CENTER, label, egui::FontId::proportional(12.0), Color32::GRAY);
 }
 
 unsafe fn draw_wheel_info(
@@ -2021,16 +1369,10 @@ unsafe fn draw_wheel_info(
     w: &ffi::lcc_wheel_state_t,
 ) {
     let txt = format!(
-        "{label}  SR {:5.2}  SA {:5.2}  w {:8.2} Load {:5.0}N  T {:4.1}°C  μ {:4.2}",
-        w.slip_ratio, w.slip_angle, w.angular_velocity, w.load, w.temperature, w.surface_friction
+        "{label}  SR {:5.2}  SA {:5.2}  ω {:8.2}  Fz {:5.0}N  T {:4.1}°C  P {:4.0}kPa",
+        w.slip_ratio, w.slip_angle_rad, w.omega_radps, w.normal_force_n, w.tire_temp_c, w.pressure_kpa
     );
-    painter.text(
-        pos,
-        Align2::LEFT_TOP,
-        txt,
-        egui::FontId::monospace(12.0),
-        Color32::WHITE,
-    );
+    painter.text(pos, Align2::LEFT_TOP, txt, egui::FontId::monospace(12.0), Color32::WHITE);
 }
 
 fn main() -> eframe::Result<()> {

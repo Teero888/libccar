@@ -40,7 +40,6 @@ fn main() {
         println!("cargo:rustc-link-lib=dylib=ccar");
     }
 
-    // Bindgen
     let bindings = bindgen::Builder::default()
         .header("../libccar.h")
         .allowlist_type("lcc_.*")
@@ -48,6 +47,7 @@ fn main() {
         .allowlist_var("LCC_.*")
         .generate_comments(true)
         .derive_default(true)
+        .constified_enum("lcc_.*")
         .generate()
         .expect("bindgen failed");
     let out = PathBuf::from(env::var("OUT_DIR").unwrap());
