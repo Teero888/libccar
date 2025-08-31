@@ -801,7 +801,7 @@ impl App {
                 let wheel_world = Vec2::new(tele.wheels[i].patch_world_pos[0], tele.wheels[i].patch_world_pos[1]);
                 // approximate steer angle for visuals: body yaw + input steer fraction
                 let steer_max = self.desc.steering.max_steer_deg * (PI as f32 / 180.0);
-                let steer_angle = if self.desc.wheels[i].steerable != 0 { self.controls.steer * steer_max } else { 0.0 };
+                let steer_angle = if self.desc.wheels[i].steerable != 0 { -self.controls.steer * steer_max } else { 0.0 };
                 let angle = yaw + steer_angle;
                 draw_wheel_vis(
                     &painter,

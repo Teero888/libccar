@@ -72,14 +72,6 @@ typedef enum lcc_transmission_type_e { LCC_TRANS_MANUAL = 0, LCC_TRANS_AUTOMATIC
 /* predefined gear indices */
 typedef enum lcc_gear_e { LCC_GEAR_REVERSE = 0, LCC_GEAR_NEUTRAL = 1 } lcc_gear_t;
 
-/* clutch / converter type */
-typedef enum lcc_clutch_type_e {
-  LCC_CLUTCH_DRY_SINGLE       = 0,
-  LCC_CLUTCH_MULTI_PLATE      = 1,
-  LCC_CLUTCH_WET              = 2,
-  LCC_CLUTCH_TORQUE_CONVERTER = 3
-} lcc_clutch_type_t;
-
 /* engine type */
 typedef enum lcc_engine_type_e { LCC_ENGINE_ICE_SPARK = 0, LCC_ENGINE_ICE_DIESEL = 1, LCC_ENGINE_DISABLED = 2 } lcc_engine_type_t;
 
@@ -316,7 +308,6 @@ typedef struct lcc_ecu_desc_s {
 /* transmission and driveline descriptors */
 typedef struct lcc_transmission_desc_s {
   lcc_transmission_type_t type;
-  lcc_clutch_type_t       clutch;
   int                     gear_count;
   float                   gear_ratios[LCC_MAX_GEARS];
   float                   final_drive_ratio;
@@ -391,11 +382,8 @@ typedef struct lcc_arb_desc_s {
 } lcc_arb_desc_t;
 
 typedef struct lcc_steering_desc_s {
-  lcc_steer_assist_t assist;
   float              max_steer_deg;
-  float              rack_ratio;
   float              ackermann_factor;
-  float              assist_gain;
 } lcc_steering_desc_t;
 
 /* damage/tolerance model description */
@@ -912,17 +900,14 @@ static void lcc__emit_event(struct lcc_car_s *car, lcc_event_type_t type, int da
 /* longitudinal slip ratio */
 static float lcc__slip_ratio(float Vlong, float omega, float r) {
   float wR    = omega * r;
-  float v_ref = 0.30f; /* m/s reference to avoid exploding at crawl */
-  float denom = fmaxf(fabsf(Vlong), fabsf(wR));
-  denom       = fmaxf(denom, v_ref);
+  float denom = fmaxf(fabsf(Vlong), 0.3f);
   float s     = (wR - Vlong) / denom;
   return lcc__clampf(s, -3.0f, 3.0f);
 }
 
 /* slip angle with sign-preserving Vx softening */
 static float lcc__slip_angle(float Vlong, float Vlat) {
-  float Vx = (fabsf(Vlong) > 0.05f) ? Vlong : (Vlong >= 0.0f ? 0.05f : -0.05f);
-  return atanf(Vlat / Vx);
+  return atan2f(Vlat, fmaxf(fabsf(Vlong), 0.1f) * lcc__signf(Vlong));
 }
 
 /* simple friction circle projection (can be changed to ellipse if needed) */
@@ -1155,8 +1140,7 @@ void lcc_ecu_desc_init_defaults(lcc_ecu_desc_t *desc) {
 void lcc_transmission_desc_init_defaults(lcc_transmission_desc_t *desc) {
   if(!desc) return;
   memset(desc, 0, sizeof(*desc));
-  desc->type   = LCC_TRANS_MANUAL;
-  desc->clutch = LCC_CLUTCH_DRY_SINGLE;
+  desc->type = LCC_TRANS_MANUAL;
   /* gear_ratios: [0]=reverse, [1]=neutral */
   desc->gear_count = 8;
   float gr[8]      = {
@@ -1279,11 +1263,8 @@ void lcc_arb_desc_init_defaults(lcc_arb_desc_t *desc) {
 void lcc_steering_desc_init_defaults(lcc_steering_desc_t *desc) {
   if(!desc) return;
   memset(desc, 0, sizeof(*desc));
-  desc->assist           = LCC_STEER_ASSIST_ELECTRIC;
   desc->max_steer_deg    = 35.0f;
-  desc->rack_ratio       = 14.0f;
   desc->ackermann_factor = 0.9f;
-  desc->assist_gain      = 1.0f;
 }
 
 void lcc_environment_init_defaults(lcc_environment_t *env) {
@@ -2150,7 +2131,7 @@ void lcc_car_set_controls(lcc_car_t *car, const lcc_controls_t *controls) {
   car->controls.throttle  = lcc__saturate(car->controls.throttle);
   car->controls.brake     = lcc__saturate(car->controls.brake);
   car->controls.clutch    = lcc__saturate(car->controls.clutch);
-  car->controls.steer     = lcc__clampf(car->controls.steer, -1.0f, 1.0f);
+  car->controls.steer     = lcc__clampf(-car->controls.steer, -1.0f, 1.0f);
   car->controls.handbrake = lcc__saturate(car->controls.handbrake);
 }
 
@@ -2192,26 +2173,6 @@ static float lcc__wheel_brake_torque_base(const lcc_car_t *car, int i) {
   T_cmd *= f_temp * f_wear * f_health;
   T_cmd = fmaxf(0.0f, T_cmd);
 
-  /* Slip-speed-driven activation to avoid oscillations at standstill */
-  float r = fmaxf(0.05f, car->desc.wheels[i].radius_m);
-  float vtire[2];
-  lcc__wheel_vel_tire_frame(car, i, vtire);
-  float Vx     = vtire[0];
-  float omega  = car->wheel_states[i].omega_radps;
-  float slip_v = fabsf(omega * r - Vx);
-
-  const float v_on   = 0.02f; /* ~2 cm/s */
-  const float v_full = 0.20f; /* ~20 cm/s */
-  float       act    = lcc__saturate((slip_v - v_on) * lcc__safe_inv((v_full - v_on), 1e-6f));
-
-  /* in neutral near stop: greatly limit brake torque to avoid excitation */
-  int gi = ((const lcc_car_t *)car)->trans_state.gear_index;
-  int in_neutral =
-    (gi == LCC_GEAR_NEUTRAL) || (gi >= 0 && gi < car->desc.transmission.gear_count && fabsf(car->desc.transmission.gear_ratios[gi]) < 1e-3f);
-
-  if(in_neutral && car->car_state.speed_mps < 0.30f && fabsf(omega * r) < 0.30f) act = fminf(act, 0.10f);
-
-  T_cmd *= act;
   return T_cmd;
 }
 
@@ -2433,23 +2394,12 @@ lcc_result_t lcc_car_step(lcc_car_t *car, float dt_s) {
   /* clutch/TC converter to trans input */
   float eng_rpm    = car->engine_state.rpm;
   float T_to_trans = 0.0f;
-  if(car->desc.transmission.clutch == LCC_CLUTCH_TORQUE_CONVERTER) {
-    float target_input_rpm          = (fabsf(gear_ratio) > 1e-3f) ? gear_ratio * shaft_out_rpm : 0.0f;
-    float SR                        = (eng_rpm > 1.0f) ? lcc__clampf(target_input_rpm / fmaxf(1.0f, eng_rpm), 0.0f, 1.0f) : 0.0f;
-    float stall_ratio               = 2.2f;
-    float mult                      = 1.0f + (stall_ratio - 1.0f) * (1.0f - SR);
-    float K                         = fmaxf(10.0f, car->desc.transmission.converter_k_factor);
-    float T_cap                     = (eng_rpm / K);
-    T_cap                           = T_cap * T_cap;
-    T_to_trans                      = fminf(tq_engine * mult, T_cap);
-    car->trans_state.converter_slip = 1.0f - SR;
-  } else {
-    float clutch_k = lcc__saturate(car->trans_state.clutch_engagement);
-    float T_cap    = 800.0f * clutch_k * car->damage_state.transmission_health;
-    T_to_trans     = tq_engine;
-    if(fabsf(T_to_trans) > T_cap) T_to_trans = lcc__signf(T_to_trans) * T_cap;
-    car->trans_state.converter_slip = 0.0f;
-  }
+
+  float clutch_k = lcc__saturate(car->trans_state.clutch_engagement);
+  float T_cap    = 800.0f * clutch_k * car->damage_state.transmission_health;
+  T_to_trans     = tq_engine;
+  if(fabsf(T_to_trans) > T_cap) T_to_trans = lcc__signf(T_to_trans) * T_cap;
+  car->trans_state.converter_slip = 0.0f;
 
   float Tw_total = T_to_trans * gear_ratio * final_drive * driveline_eff;
 
@@ -2619,11 +2569,7 @@ lcc_result_t lcc_car_step(lcc_car_t *car, float dt_s) {
     float Tbr      = Tbr_base + car->esc_extra_brake[i];
     Tbr            = lcc__abs_apply(car, i, Tbr, s, dt_s);
 
-    /* choose brake sign to oppose rolling slip */
-    float slip_w   = ws->omega_radps * r - Vx;
-    float Tbr_sign = (fabsf(slip_w) > 0.05f) ?
-      lcc__signf(slip_w) :
-      ((fabsf(ws->omega_radps) > 0.5f) ? lcc__signf(ws->omega_radps) : (ws->brake_torque_nm >= 0.0f ? 1.0f : -1.0f));
+    float Tbr_sign = lcc__signf(ws->omega_radps);
 
     /* contact patch torque from longitudinal */
     float T_contact = Fx0 * r;
@@ -2737,7 +2683,6 @@ lcc_result_t lcc_car_step(lcc_car_t *car, float dt_s) {
   /* engine speed dynamics */
   float eng_omega    = lcc__rpm_to_radps(car->engine_state.rpm);
   float load_omega   = lcc__rpm_to_radps(fabsf(gear_ratio * shaft_out_rpm));
-  float clutch_k     = (car->desc.transmission.clutch == LCC_CLUTCH_TORQUE_CONVERTER) ? 0.5f : lcc__saturate(car->trans_state.clutch_engagement);
   float Ieng         = fmaxf(0.02f, car->desc.engine.inertia_kgm2);
   float domega_free  = (tq_engine - T_to_trans) / Ieng;
   float domega_track = (load_omega - eng_omega) * (6.0f * clutch_k);
@@ -2747,9 +2692,8 @@ lcc_result_t lcc_car_step(lcc_car_t *car, float dt_s) {
 
   /* stall detection */
   if(car->engine_state.running) {
-    int in_gear    = (car->trans_state.gear_index != LCC_GEAR_NEUTRAL) && (fabsf(gear_ratio) > 1e-3f);
-    int clutch_eng = (car->trans_state.clutch_engagement > 0.7f);
-    if(car->engine_state.rpm < car->desc.engine.stall_rpm && (car->engine_state.throttle_effective < 0.05f) && (in_gear && clutch_eng)) {
+    int in_gear = (car->trans_state.gear_index != LCC_GEAR_NEUTRAL);
+    if(car->engine_state.rpm < car->desc.engine.stall_rpm && (car->engine_state.throttle_effective < 0.05f) && in_gear) {
       car->engine_state.running   = 0;
       car->engine_state.stalled   = 1;
       car->engine_state.torque_nm = 0.0f;
@@ -2826,14 +2770,6 @@ lcc_result_t lcc_car_step(lcc_car_t *car, float dt_s) {
   if(car->desc.ecu.esc_mode == LCC_ESC_ON && any_esc && (car->car_state.time_s - car->last_esc_evt_time) > 0.3) {
     car->last_esc_evt_time = car->car_state.time_s;
     lcc__emit_event(car, LCC_EVENT_ESC_ACTIVE, 0, 0.0f);
-  }
-
-  /* parking hold */
-  if(car->controls.brake > 0.6f && car->car_state.speed_mps < 0.03f) {
-    car->car_state.vel_body[0] = car->car_state.vel_body[1] = 0.0f;
-    car->car_state.vel_world[0] = car->car_state.vel_world[1] = 0.0f;
-    car->car_state.yaw_rate_radps                             = 0.0f;
-    for(int i = 0; i < car->wheel_count; ++i) car->wheel_states[i].omega_radps = 0.0f;
   }
 
   return LCC_OK;
