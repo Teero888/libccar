@@ -5,3 +5,4 @@ car_demo/lib/libccar.so
 perf.*
 *.out
 .vscode
+*.diff

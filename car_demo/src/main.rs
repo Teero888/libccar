@@ -1166,7 +1166,7 @@ impl App {
             draw_bar(&painter, Pos2::new(tb_origin.x, tb_origin.y + 72.0), "Steer", (self.controls.steer + 1.0) / 2.0, Color32::YELLOW);
 
             let gear = tele.transmission.gear_index;
-            let gtxt = if gear == 0 { "N".to_string() } else if gear == self.desc.transmission.gear_index_reverse { "R".to_string() } else { format!("{}", gear) };
+            let gtxt = if gear == 0 { "R".to_string() } else if gear == 1 { "N".to_string() } else { format!("{}", gear - 1) };
             painter.text(
                 Pos2::new(origin.x - 60.0, origin.y + 70.0),
                 Align2::CENTER_CENTER,

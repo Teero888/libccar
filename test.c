@@ -101,7 +101,7 @@ int lcc_run_self_test(void)
 
     /* steerable fronts, driven fronts (FWD by default) */
     desc.driveline.layout = LCC_LAYOUT_FWD;
-    desc.transmission.type = LCC_TRANS_AUTOMATIC; /* try auto to exercise auto-shift */
+    desc.transmission.type = LCC_TRANS_MANUAL;
     desc.transmission.auto_upshift_rpm = 6200.0f;
     desc.transmission.auto_downshift_rpm = 1200.0f;
 
@@ -146,7 +146,7 @@ int lcc_run_self_test(void)
     lcc_controls_t c = {0};
     c.ignition_switch = 1;
     c.starter = 0;
-    c.clutch = 0.0f; /* engaged */
+    c.clutch = 0.0f;
     c.steer = 0.0f;
     c.throttle = 0.2f;
 
@@ -177,25 +177,7 @@ int lcc_run_self_test(void)
     lcc_damage_state_t dmg; lcc_car_get_damage_state(car, &dmg);
     printf("damage: engine=%.2f brFL=%.2f\n", dmg.engine_health, dmg.brake_health[0]);
 
-    /* 8) Serialization/deserialization */
-    size_t need = 0;
-    lcc_car_serialize(car, NULL, 0, &need);
-    void* blob = malloc(need);
-    if (!blob) { fprintf(stderr, "oom\n"); lcc_car_destroy(car); return -3; }
-    if (lcc_car_serialize(car, blob, need, NULL) != LCC_OK) {
-        fprintf(stderr, "serialize failed\n"); free(blob); lcc_car_destroy(car); return -4;
-    }
-
-    lcc_car_t* car2 = NULL;
-    if (lcc_car_deserialize(&car2, blob, need) != LCC_OK) {
-        fprintf(stderr, "deserialize failed\n"); free(blob); lcc_car_destroy(car); return -5;
-    }
-    free(blob);
-    lcc_car_destroy(car);
-    car = car2;
-    printf("deserialized and continuing...\n");
-
-    /* 9) Playback controls: small script */
+    /* 8) Playback controls: small script */
     lcc_control_frame_t script[] = {
         { 0.0,  { .throttle=0.0f, .brake=0.0f, .clutch=0.0f, .steer=0.0f } },
         { 0.5,  { .throttle=0.4f, .brake=0.0f, .clutch=0.0f, .steer=0.0f } },
@@ -210,7 +192,7 @@ int lcc_run_self_test(void)
         print_line(car, "post-playback");
     }
 
-    /* 10) Debug formatters */
+    /* 9) Debug formatters */
     {
         lcc_engine_state_t es; lcc_transmission_state_t ts; lcc_wheel_state_t ws;
         char buf[256];
@@ -223,13 +205,13 @@ int lcc_run_self_test(void)
         lcc_format_wheel_summary(&ws, buf, sizeof(buf)); printf("%s\n", buf);
     }
 
-    /* 11) Unit helpers sanity */
+    /* 10) Unit helpers sanity */
     float d = 90.0f;
     float r = lcc_deg_to_rad(d);
     float d2 = lcc_rad_to_deg(r);
     printf("units: %.2f deg -> %.3f rad -> %.2f deg\n", d, r, d2);
 
-    /* 12) Wrap up */
+    /* 11) Wrap up */
     printf("events captured: %d\n", ev.count);
     lcc_car_destroy(car);
     return 0;

@@ -2,7 +2,7 @@
    libccar - 2d top-down car simulation api (c99 single header)
    top-level api: public functions and data structures
    prefix: lcc_
-   space: 2d plane (x forward, y right), right-handed rotation (cw positive)
+   space: 2d plane (+x forward, +y right), right-handed rotation (cw positive)
    fuck the license for now i just wanna get things to work
 */
 
@@ -68,6 +68,9 @@ typedef enum lcc_drivetrain_layout_e { LCC_LAYOUT_FWD = 0, LCC_LAYOUT_RWD = 1, L
 
 /* transmission type */
 typedef enum lcc_transmission_type_e { LCC_TRANS_MANUAL = 0, LCC_TRANS_AUTOMATIC = 1, LCC_TRANS_CVT = 2, LCC_TRANS_DCT = 3 } lcc_transmission_type_t;
+
+/* predefined gear indices */
+typedef enum lcc_gear_e { LCC_GEAR_REVERSE = 0, LCC_GEAR_NEUTRAL = 1 } lcc_gear_t;
 
 /* clutch / converter type */
 typedef enum lcc_clutch_type_e {
@@ -305,7 +308,6 @@ typedef struct lcc_ecu_desc_s {
   lcc_abs_mode_t abs_mode;
   lcc_tc_mode_t  tc_mode;
   lcc_esc_mode_t esc_mode;
-  lcc_bool_t     auto_blip;
   lcc_bool_t     auto_clutch;
   lcc_bool_t     idle_control;
   float          idle_pid_p, idle_pid_i, idle_pid_d;
@@ -318,8 +320,6 @@ typedef struct lcc_transmission_desc_s {
   lcc_clutch_type_t       clutch;
   int                     gear_count;
   float                   gear_ratios[LCC_MAX_GEARS];
-  int                     gear_index_neutral;
-  int                     gear_index_reverse;
   float                   final_drive_ratio;
   float                   shift_time_s;
   float                   auto_upshift_rpm;
@@ -447,10 +447,6 @@ typedef struct lcc_controls_s {
   float clutch; /* 1 = fully disengaged */
   float steer;  /* -1..1 */
   float handbrake;
-
-  lcc_bool_t request_gear_up;
-  lcc_bool_t request_gear_down;
-  int        request_gear_index;
 
   lcc_bool_t ignition_switch;
   lcc_bool_t starter;
@@ -732,10 +728,6 @@ LCC_API int  lcc_car_get_wheel_local_positions(const lcc_car_t *car, float out_p
 /* event subscription */
 LCC_API void lcc_car_set_event_callback(lcc_car_t *car, lcc_event_cb callback, void *user);
 
-/* serialization helpers (binary blob) */
-LCC_API lcc_result_t lcc_car_serialize(const lcc_car_t *car, void *buffer, size_t buffer_size, size_t *bytes_written);
-LCC_API lcc_result_t lcc_car_deserialize(lcc_car_t **car_out, const void *buffer, size_t buffer_size);
-
 /* deterministic controls recording/playback */
 typedef struct lcc_control_frame_s {
   double         time_s;
@@ -777,6 +769,17 @@ LCC_API float lcc_rad_to_deg(float rad);
 
 /* internal helpers */
 
+/* =========================================================================================
+   Defaults and constants
+   ========================================================================================= */
+/* Default engine curves so a car drives without user maps */
+static const lcc_curve1d_point_t LCC__DEF_ENGINE_WOT_POINTS[] = { { 800.0f, 100.0f }, { 1200.0f, 135.0f }, { 1800.0f, 165.0f }, { 2500.0f, 185.0f },
+  { 3200.0f, 200.0f }, { 4000.0f, 210.0f }, { 5000.0f, 205.0f }, { 6000.0f, 190.0f }, { 6500.0f, 175.0f } };
+static const lcc_curve1d_point_t LCC__DEF_ENGINE_FRICTION_POINTS[] = { { 600.0f, 10.0f }, { 1000.0f, 13.0f }, { 2000.0f, 18.0f }, { 3000.0f, 24.0f },
+  { 4000.0f, 30.0f }, { 5000.0f, 36.0f }, { 6000.0f, 42.0f }, { 7000.0f, 49.0f } };
+static const lcc_curve1d_point_t LCC__DEF_THROTTLE_MAP_POINTS[]    = { { 0.0f, 0.0f }, { 0.25f, 0.25f }, { 0.5f, 0.5f }, { 0.75f, 0.75f },
+     { 1.0f, 1.0f } };
+
 /* allocator state */
 static lcc_alloc_fn lcc__alloc      = NULL;
 static lcc_free_fn  lcc__free       = NULL;
@@ -800,10 +803,6 @@ static float lcc__clampf(float v, float lo, float hi) {
 
 static int lcc__mini(int a, int b) {
   return a < b ? a : b;
-}
-
-static int lcc__maxi(int a, int b) {
-  return a > b ? a : b;
 }
 
 static float lcc__saturate(float v) {
@@ -838,35 +837,6 @@ static float lcc__rad2deg(float r) {
 static void lcc__v2_zero(float a[2]) {
   a[0] = 0.0f;
   a[1] = 0.0f;
-}
-
-static void lcc__v2_set(float a[2], float x, float y) {
-  a[0] = x;
-  a[1] = y;
-}
-
-static void lcc__v2_copy(float a[2], const float b[2]) {
-  a[0] = b[0];
-  a[1] = b[1];
-}
-
-static void lcc__v2_add(float a[2], const float b[2]) {
-  a[0] += b[0];
-  a[1] += b[1];
-}
-
-static void lcc__v2_sub(float a[2], const float b[2]) {
-  a[0] -= b[0];
-  a[1] -= b[1];
-}
-
-static void lcc__v2_scale(float a[2], float s) {
-  a[0] *= s;
-  a[1] *= s;
-}
-
-static float lcc__v2_dot(const float a[2], const float b[2]) {
-  return a[0] * b[0] + a[1] * b[1];
 }
 
 static float lcc__v2_len(const float a[2]) {
@@ -922,20 +892,6 @@ static float lcc__map2d_eval(const lcc_map2d_t *m, float x, float y) {
   return bestv;
 }
 
-/* string util */
-static int lcc__stricmp(const char *a, const char *b) {
-  if(!a || !b) return (a == b) ? 0 : (a ? 1 : -1);
-  while(*a && *b) {
-    char ca = *a, cb = *b;
-    if(ca >= 'A' && ca <= 'Z') ca = (char)(ca - 'A' + 'a');
-    if(cb >= 'A' && cb <= 'Z') cb = (char)(cb - 'A' + 'a');
-    if(ca != cb) return (int)((unsigned char)ca) - (int)((unsigned char)cb);
-    ++a;
-    ++b;
-  }
-  return (int)((unsigned char)*a) - (int)((unsigned char)*b);
-}
-
 /* rpm/rad/s */
 static float lcc__rpm_to_radps(float rpm) {
   return rpm * (LCC_TAU / 60.0f);
@@ -989,26 +945,15 @@ struct lcc_car_s {
   float shift_timer_s;
   int   pending_gear_index;
 
-  /* aids internal state */
+  /* aids internal state TODO: refactor this, this is bad lol? */
   float abs_mod[LCC_MAX_WHEELS];
   float tc_cut; /* 0..1 cut factor applied to engine torque */
   float esc_extra_brake[LCC_MAX_WHEELS];
+  float idle_i; /* idle control integrator (internal) */
 
   /* suspension internals */
   float susp_travel[LCC_MAX_WHEELS];
   float susp_vel[LCC_MAX_WHEELS];
-
-  /* ownership for curve/map memory when loaded via deserialize */
-  lcc_curve1d_point_t *own_wot_pts;
-  int                  own_wot_cnt;
-  lcc_curve1d_point_t *own_fric_pts;
-  int                  own_fric_cnt;
-  lcc_curve1d_point_t *own_thrt_pts;
-  int                  own_thrt_cnt;
-  lcc_map2d_point_t   *own_boost_pts;
-  int                  own_boost_cnt;
-  lcc_map2d_point_t   *own_spark_pts;
-  int                  own_spark_cnt;
 
   lcc_event_cb evt_cb;
   void        *evt_user;
@@ -1070,6 +1015,14 @@ void lcc_engine_desc_init_defaults(lcc_engine_desc_t *desc) {
   desc->coolant_heat_capacity_j_per_k = 60000.0f;
   desc->oil_heat_capacity_j_per_k     = 40000.0f;
   desc->egt_nominal_c                 = 750.0f;
+
+  /* sane default maps */
+  desc->wot_torque_nm_vs_rpm.points      = LCC__DEF_ENGINE_WOT_POINTS;
+  desc->wot_torque_nm_vs_rpm.count       = (int)(sizeof(LCC__DEF_ENGINE_WOT_POINTS) / sizeof(LCC__DEF_ENGINE_WOT_POINTS[0]));
+  desc->friction_torque_nm_vs_rpm.points = LCC__DEF_ENGINE_FRICTION_POINTS;
+  desc->friction_torque_nm_vs_rpm.count  = (int)(sizeof(LCC__DEF_ENGINE_FRICTION_POINTS) / sizeof(LCC__DEF_ENGINE_FRICTION_POINTS[0]));
+  desc->throttle_map.points              = LCC__DEF_THROTTLE_MAP_POINTS;
+  desc->throttle_map.count               = (int)(sizeof(LCC__DEF_THROTTLE_MAP_POINTS) / sizeof(LCC__DEF_THROTTLE_MAP_POINTS[0]));
 }
 
 void lcc_ignition_desc_init_defaults(lcc_ignition_desc_t *desc) {
@@ -1146,11 +1099,15 @@ void lcc_starter_desc_init_defaults(lcc_starter_desc_t *desc) {
 void lcc_ecu_desc_init_defaults(lcc_ecu_desc_t *desc) {
   if(!desc) return;
   memset(desc, 0, sizeof(*desc));
-  desc->abs_mode           = LCC_ABS_ON;
-  desc->tc_mode            = LCC_TC_ON;
-  desc->esc_mode           = LCC_ESC_ON;
-  desc->auto_blip          = 1;
-  desc->auto_clutch        = 1;
+
+  /* TODO: one of these is fucked up */
+  desc->abs_mode = LCC_ABS_OFF;
+  desc->tc_mode  = LCC_TC_OFF;
+  desc->esc_mode = LCC_ESC_OFF;
+
+  /* TODO: this only in automatic transmission? could be completely removed */
+  desc->auto_clutch = 0;
+
   desc->idle_control       = 1;
   desc->idle_pid_p         = 0.5f;
   desc->idle_pid_i         = 0.1f;
@@ -1163,12 +1120,19 @@ void lcc_transmission_desc_init_defaults(lcc_transmission_desc_t *desc) {
   memset(desc, 0, sizeof(*desc));
   desc->type   = LCC_TRANS_MANUAL;
   desc->clutch = LCC_CLUTCH_DRY_SINGLE;
-  /* gear_ratios: [0]=reverse, [1]=1st */
-  desc->gear_count = 7;
-  float gr[7]      = { -3.2f, 3.1f, 2.1f, 1.5f, 1.2f, 1.0f, 0.84f };
+  /* gear_ratios: [0]=reverse, [1]=neutral */
+  desc->gear_count = 8;
+  float gr[8]      = {
+    -3.2f,
+    0.0f,
+    3.1f,
+    2.1f,
+    1.5f,
+    1.2f,
+    1.0f,
+    0.84f,
+  };
   for(int i = 0; i < desc->gear_count; ++i) desc->gear_ratios[i] = gr[i];
-  desc->gear_index_neutral  = -1;
-  desc->gear_index_reverse  = 0;
   desc->final_drive_ratio   = 3.9f;
   desc->shift_time_s        = 0.30f;
   desc->auto_upshift_rpm    = 6500.0f;
@@ -1373,13 +1337,13 @@ static void lcc__compute_static_loads(lcc_car_t *car) {
   if(car->wheel_count <= 0) return;
 
   float half_wb    = car->desc.chassis.wheelbase_m * 0.5f;
-  float cg_y       = car->desc.chassis.cg_local[1];
-  float front_frac = (half_wb + cg_y) / (2.0f * half_wb);
+  float cg_x       = car->desc.chassis.cg_local[0];
+  float front_frac = (half_wb + cg_x) / (2.0f * half_wb);
   front_frac       = lcc__clampf(front_frac, 0.0f, 1.0f);
 
   int front_wheels = 0, rear_wheels = 0;
   for(int i = 0; i < car->wheel_count; ++i)
-    if(car->desc.wheels[i].position_local[1] >= 0.0f) front_wheels++;
+    if(car->desc.wheels[i].position_local[0] >= 0.0f) front_wheels++;
     else
       rear_wheels++;
 
@@ -1387,7 +1351,7 @@ static void lcc__compute_static_loads(lcc_car_t *car) {
   float rear_total  = m * g * (1.0f - front_frac);
 
   for(int i = 0; i < car->wheel_count; ++i) {
-    float axle_total            = (car->desc.wheels[i].position_local[1] >= 0.0f) ? (front_wheels ? front_total / (float)front_wheels : 0.0f) :
+    float axle_total            = (car->desc.wheels[i].position_local[0] >= 0.0f) ? (front_wheels ? front_total / (float)front_wheels : 0.0f) :
                                                                                     (rear_wheels ? rear_total / (float)rear_wheels : 0.0f);
     car->wheel_static_load_n[i] = axle_total;
     car->wheel_states[i].normal_force_n = axle_total;
@@ -1465,7 +1429,7 @@ static void lcc__init_runtime(lcc_car_t *car) {
   car->exh_state.backpressure_kpa = car->desc.exhaust.backpressure_kpa;
   car->exh_state.cat_temp_c       = car->env.ambient_temp_c;
 
-  car->trans_state.gear_index        = (car->desc.transmission.gear_index_neutral >= 0) ? car->desc.transmission.gear_index_neutral : 1;
+  car->trans_state.gear_index        = 1; /* start in neutral */
   car->trans_state.clutch_engagement = 1.0f;
   car->trans_state.input_rpm         = 0.0f;
   car->trans_state.output_rpm        = 0.0f;
@@ -1510,7 +1474,7 @@ static void lcc__apply_steering(lcc_car_t *car) {
   float max   = lcc__deg2rad(car->desc.steering.max_steer_deg);
   float delta = in * max;
 
-  /* find front left/right indices */
+  /* find front left/right indices TODO: FIND A WAY TO FIX THIS IN GENERAL IN ANY WHEEL CONFIGURATION */
   int   fiL = -1, fiR = -1;
   float wb    = fmaxf(0.1f, car->desc.chassis.wheelbase_m);
   float track = fmaxf(0.8f, car->desc.chassis.track_front_m);
@@ -1573,7 +1537,7 @@ static void lcc__aero_compute(const lcc_car_t *car, const float rel_vel_world[2]
   if(car->car_state.speed_mps > 0.1f) {
     float vel_body[2];
     lcc__v2_rot(vel_body, car->car_state.vel_world, -car->car_state.yaw_rad);
-    beta = atanf(lcc__absf(vel_body[0]) / fmaxf(0.1f, lcc__absf(vel_body[1])));
+    beta = atanf(lcc__absf(vel_body[1]) / fmaxf(0.1f, lcc__absf(vel_body[0])));
   }
   float drag_mag = q * Cd * A * (1.0f + car->desc.aero.yaw_drag_gain * lcc__absf(beta));
   float dir[2]   = { rel_vel_world[0], rel_vel_world[1] };
@@ -1589,20 +1553,13 @@ static void lcc__aero_compute(const lcc_car_t *car, const float rel_vel_world[2]
   if(df_rear) *df_rear = Fdr;
 }
 
-/* compute body-frame hub velocity in tire frame */
-/* TODO: critical function make sure this is correct */
+/* compute hub velocity in tire frame (use body-frame to avoid world rot noise) */
 static void lcc__wheel_vel_tire_frame(const lcc_car_t *car, int i, float out_tire_vel[2]) {
-  float yaw        = car->car_state.yaw_rad;
-  float invyaw     = -yaw;
-  float r_local[2] = { car->desc.wheels[i].position_local[0], car->desc.wheels[i].position_local[1] };
-  float r_world[2];
-  lcc__v2_rot(r_world, r_local, yaw);
-  float v_world[2]      = { car->car_state.vel_world[0], car->car_state.vel_world[1] };
-  float v_spin_world[2] = { -car->car_state.yaw_rate_radps * r_world[1], car->car_state.yaw_rate_radps * r_world[0] };
-  float hub_world[2]    = { v_world[0] + v_spin_world[0], v_world[1] + v_spin_world[1] };
-  float hub_body[2];
-  lcc__v2_rot(hub_body, hub_world, invyaw);
-  float steer = car->wheel_steer_rad[i];
+  float r_local[2]     = { car->desc.wheels[i].position_local[0], car->desc.wheels[i].position_local[1] };
+  float v_body[2]      = { car->car_state.vel_body[0], car->car_state.vel_body[1] };
+  float v_spin_body[2] = { -car->car_state.yaw_rate_radps * r_local[1], car->car_state.yaw_rate_radps * r_local[0] };
+  float hub_body[2]    = { v_body[0] + v_spin_body[0], v_body[1] + v_spin_body[1] };
+  float steer          = car->wheel_steer_rad[i];
   float hub_tire[2];
   lcc__v2_rot(hub_tire, hub_body, -steer);
   out_tire_vel[0] = hub_tire[0];
@@ -1619,15 +1576,16 @@ static void lcc__compute_normal_loads(lcc_car_t *car, float df_front, float df_r
 
   float Fz_front_static = 0.0f, Fz_rear_static = 0.0f;
   for(int i = 0; i < car->wheel_count; ++i)
-    if(car->desc.wheels[i].position_local[1] >= 0.0f) Fz_front_static += car->wheel_static_load_n[i];
+    if(car->desc.wheels[i].position_local[0] >= 0.0f) Fz_front_static += car->wheel_static_load_n[i];
     else
       Fz_rear_static += car->wheel_static_load_n[i];
 
   Fz_front_static += df_front;
   Fz_rear_static += df_rear;
 
-  float ax = car->car_state.acc_body[1];
-  float ay = car->car_state.acc_body[0];
+  /* body-frame: [0]=longitudinal (x forward), [1]=lateral (y right) */
+  float ax = car->car_state.acc_body[0];
+  float ay = car->car_state.acc_body[1];
 
   float dF_long      = m * ax * h / wb;
   float dF_lat_front = m * ay * h / track_f;
@@ -1637,16 +1595,19 @@ static void lcc__compute_normal_loads(lcc_car_t *car, float df_front, float df_r
   float Fz_rear  = Fz_rear_static + dF_long;
 
   int front_wheels = 0, rear_wheels = 0;
-  for(int i = 0; i < car->wheel_count; ++i) (car->desc.wheels[i].position_local[1] >= 0.0f) ? front_wheels++ : rear_wheels++;
+  for(int i = 0; i < car->wheel_count; ++i) (car->desc.wheels[i].position_local[0] >= 0.0f) ? front_wheels++ : rear_wheels++;
 
   float Fz_front_per = (front_wheels > 0) ? (Fz_front / (float)front_wheels) : 0.0f;
   float Fz_rear_per  = (rear_wheels > 0) ? (Fz_rear / (float)rear_wheels) : 0.0f;
 
   for(int i = 0; i < car->wheel_count; ++i) {
-    float base = (car->desc.wheels[i].position_local[1] >= 0.0f) ? Fz_front_per : Fz_rear_per;
-    float dlat = (car->desc.wheels[i].position_local[1] >= 0.0f) ? (-lcc__signf(car->desc.wheels[i].position_local[0]) * 0.5f * dF_lat_front) :
-                                                                   (-lcc__signf(car->desc.wheels[i].position_local[0]) * 0.5f * dF_lat_rear);
+    int   is_front = (car->desc.wheels[i].position_local[0] >= 0.0f);
+    float base     = is_front ? Fz_front_per : Fz_rear_per;
+    /* left wheels have y<0, take more load when ay>0 (to the right) */
+    float side = (car->desc.wheels[i].position_local[1] < 0.0f) ? -1.0f : 1.0f;
+    float dlat = is_front ? (-side * 0.5f * dF_lat_front) : (-side * 0.5f * dF_lat_rear);
     float Fz   = base + dlat;
+
     car->wheel_states[i].normal_force_n = fmaxf(0.0f, Fz);
   }
 }
@@ -1660,49 +1621,60 @@ typedef struct lcc_axle_torques_s {
 
 static lcc_axle_torques_t lcc__diff_open(float T_in, float Tlim_L, float Tlim_R) {
   lcc_axle_torques_t r;
-  float              half = 0.5f * T_in;
-  r.left_nm               = fminf(half, Tlim_L);
-  r.right_nm              = fminf(half, Tlim_R);
-  r.delivered_nm          = r.left_nm + r.right_nm;
+  float              s    = lcc__signf(T_in);
+  float              Tin  = lcc__absf(T_in);
+  float              TLc  = fmaxf(0.0f, Tlim_L);
+  float              TRc  = fmaxf(0.0f, Tlim_R);
+  float              half = 0.5f * Tin;
+  float              TL   = fminf(half, TLc);
+  float              TR   = fminf(half, TRc);
+  r.left_nm               = s * TL;
+  r.right_nm              = s * TR;
+  r.delivered_nm          = s * (TL + TR);
   return r;
 }
 
 static lcc_axle_torques_t lcc__diff_locked(float T_in, float Tlim_L, float Tlim_R) {
-  lcc_axle_torques_t r      = { 0 };
-  float              half   = 0.5f * T_in;
-  float              TL     = fminf(half, Tlim_L);
-  float              TR     = fminf(half, Tlim_R);
-  float              rem    = T_in - (TL + TR);
-  float              spareL = fmaxf(0.0f, Tlim_L - TL);
+  lcc_axle_torques_t r      = (lcc_axle_torques_t){ 0 };
+  float              s      = lcc__signf(T_in);
+  float              Tin    = lcc__absf(T_in);
+  float              TLcap  = fmaxf(0.0f, Tlim_L);
+  float              TRcap  = fmaxf(0.0f, Tlim_R);
+  float              TL     = fminf(0.5f * Tin, TLcap);
+  float              TR     = fminf(0.5f * Tin, TRcap);
+  float              rem    = fmaxf(0.0f, Tin - (TL + TR));
+  float              spareL = fmaxf(0.0f, TLcap - TL);
   float              dL     = fminf(spareL, 0.5f * rem);
-  TL += fmaxf(0.0f, dL);
-  float spareR = fmaxf(0.0f, Tlim_R - TR);
+  TL += dL;
+  float spareR = fmaxf(0.0f, TRcap - TR);
   float dR     = fminf(spareR, rem - dL);
-  TR += fmaxf(0.0f, dR);
-  r.left_nm      = TL;
-  r.right_nm     = TR;
-  r.delivered_nm = TL + TR;
+  TR += dR;
+  r.left_nm      = s * TL;
+  r.right_nm     = s * TR;
+  r.delivered_nm = s * (TL + TR);
   return r;
 }
 
 static lcc_axle_torques_t lcc__diff_torsen(float T_in, float Tlim_L, float Tlim_R, float bias_ratio, float preload_nm) {
-  lcc_axle_torques_t r            = { 0 };
+  lcc_axle_torques_t r            = (lcc_axle_torques_t){ 0 };
+  float              s            = lcc__signf(T_in);
+  float              Tin          = lcc__absf(T_in);
   float              B            = fmaxf(1.0f, bias_ratio);
-  float              low          = fminf(Tlim_L, Tlim_R);
-  float              high         = fmaxf(Tlim_L, Tlim_R);
+  float              low          = fminf(fmaxf(0.0f, Tlim_L), fmaxf(0.0f, Tlim_R));
+  float              high         = fmaxf(fmaxf(0.0f, Tlim_L), fmaxf(0.0f, Tlim_R));
   float              preload_each = 0.5f * preload_nm;
   float              capacity     = low * (1.0f + B) + preload_nm;
-  float              T_use        = fminf(T_in, capacity);
+  float              T_use        = fminf(Tin, capacity);
   float              Tlow         = fminf(low + preload_each, T_use / (1.0f + B));
   float              Thigh        = fminf(high + preload_each, T_use - Tlow);
   if(Tlim_L <= Tlim_R) {
-    r.left_nm  = Tlow;
-    r.right_nm = Thigh;
+    r.left_nm  = s * Tlow;
+    r.right_nm = s * Thigh;
   } else {
-    r.left_nm  = Thigh;
-    r.right_nm = Tlow;
+    r.left_nm  = s * Thigh;
+    r.right_nm = s * Tlow;
   }
-  r.delivered_nm = r.left_nm + r.right_nm;
+  r.delivered_nm = s * (lcc__absf(r.left_nm) + lcc__absf(r.right_nm));
   return r;
 }
 
@@ -1817,14 +1789,13 @@ static void lcc__esc_update(lcc_car_t *car, float dt) {
   float track_r = fmaxf(0.8f, car->desc.chassis.track_rear_m);
   float track   = 0.5f * (track_f + track_r);
   float r_eff   = 0.3f;
-
-  /* choose outside wheels depending on yaw sign */
-  int   left_is_outside = (Mz_cmd < 0.0f) ? 1 : 0; /* negative moment -> brake left to reduce pos yaw */
+  /* choose outside wheels depending on yaw sign; left= y<0 */
+  int   left_is_outside = (Mz_cmd < 0.0f) ? 1 : 0;
   float T_side          = lcc__absf(Mz_cmd) / fmaxf(0.2f, track) / fmaxf(0.05f, r_eff);
   T_side                = lcc__clampf(T_side, 0.0f, 1500.0f);
 
   for(int i = 0; i < car->wheel_count; ++i) {
-    int is_left = (car->desc.wheels[i].position_local[0] < 0.0f);
+    int is_left = (car->desc.wheels[i].position_local[1] < 0.0f);
     if((left_is_outside && is_left) || (!left_is_outside && !is_left)) car->esc_extra_brake[i] = T_side;
   }
 }
@@ -1848,29 +1819,12 @@ lcc_car_t *lcc_car_create(const lcc_car_desc_t *desc) {
 
   snprintf(car->version_str, sizeof(car->version_str), "%d.%d.%d", LCC_VERSION_MAJOR, LCC_VERSION_MINOR, LCC_VERSION_PATCH);
 
-  car->own_wot_pts   = NULL;
-  car->own_wot_cnt   = 0;
-  car->own_fric_pts  = NULL;
-  car->own_fric_cnt  = 0;
-  car->own_thrt_pts  = NULL;
-  car->own_thrt_cnt  = 0;
-  car->own_boost_pts = NULL;
-  car->own_boost_cnt = 0;
-  car->own_spark_pts = NULL;
-  car->own_spark_cnt = 0;
-
   lcc__init_runtime(car);
   return car;
 }
 
 void lcc_car_destroy(lcc_car_t *car) {
   if(!car) return;
-  /* free any owned curve/map memory */
-  if(car->own_wot_pts) lcc__free(car->own_wot_pts, lcc__alloc_user);
-  if(car->own_fric_pts) lcc__free(car->own_fric_pts, lcc__alloc_user);
-  if(car->own_thrt_pts) lcc__free(car->own_thrt_pts, lcc__alloc_user);
-  if(car->own_boost_pts) lcc__free(car->own_boost_pts, lcc__alloc_user);
-  if(car->own_spark_pts) lcc__free(car->own_spark_pts, lcc__alloc_user);
   lcc__free(car, lcc__alloc_user);
 }
 
@@ -2011,6 +1965,7 @@ lcc_result_t lcc_car_request_gear(lcc_car_t *car, int gear_index) {
   car->pending_gear_index   = gear_index;
   car->trans_state.shifting = 1;
   car->shift_timer_s        = lcc__clampf(car->desc.transmission.shift_time_s, 0.05f, 1.0f);
+  printf("Requesting gear %d, shift_timer_s: %.2f\n", gear_index, car->shift_timer_s);
   return LCC_OK;
 }
 
@@ -2018,26 +1973,16 @@ lcc_result_t lcc_car_shift_up(lcc_car_t *car) {
   if(!car) return LCC_ERR_INVALID_ARG;
   int next = car->trans_state.gear_index + 1;
   if(next >= car->desc.transmission.gear_count) next = car->desc.transmission.gear_count - 1;
+  printf("Shifting up to %d\n", next);
   return lcc_car_request_gear(car, next);
 }
 
 lcc_result_t lcc_car_shift_down(lcc_car_t *car) {
   if(!car) return LCC_ERR_INVALID_ARG;
-  int next = car->trans_state.gear_index - 1;
-  if(car->desc.transmission.type != LCC_TRANS_MANUAL) {
-    int rev     = car->desc.transmission.gear_index_reverse;
-    int neu     = car->desc.transmission.gear_index_neutral;
-    int min_fwd = 0;
-    for(int i = 0; i < car->desc.transmission.gear_count; ++i) {
-      if(i != rev && i != neu) {
-        min_fwd = i;
-        break;
-      }
-    }
-    if(next < min_fwd) next = min_fwd; /* don't auto-shift to N/R */
-  } else {
-    if(next < 0) next = 0;
-  }
+  int next     = car->trans_state.gear_index - 1;
+  int min_gear = car->desc.transmission.type != LCC_TRANS_MANUAL ? 2 : 0;
+  if(next < min_gear) next = min_gear;
+  printf("Shifting down to %d\n", next);
   return lcc_car_request_gear(car, next);
 }
 
@@ -2132,12 +2077,6 @@ void lcc_car_set_controls(lcc_car_t *car, const lcc_controls_t *controls) {
   car->controls.clutch    = lcc__saturate(car->controls.clutch);
   car->controls.steer     = lcc__clampf(car->controls.steer, -1.0f, 1.0f);
   car->controls.handbrake = lcc__saturate(car->controls.handbrake);
-
-  if(car->controls.request_gear_index >= 0) lcc_car_request_gear(car, car->controls.request_gear_index);
-  else if(car->controls.request_gear_up)
-    lcc_car_shift_up(car);
-  else if(car->controls.request_gear_down)
-    lcc_car_shift_down(car);
 }
 
 void lcc_car_get_controls(const lcc_car_t *car, lcc_controls_t *controls_out) {
@@ -2150,7 +2089,8 @@ static float lcc__wheel_brake_torque_base(const lcc_car_t *car, int i) {
   const lcc_brake_desc_t *br = &car->desc.brakes[i];
   if(!car->desc.wheels[i].has_brake) return 0.0f;
   float cmd = lcc__saturate(car->controls.brake);
-  if(car->controls.handbrake > 0.0f && car->desc.wheels[i].position_local[1] < 0.0f) cmd = fmaxf(cmd, lcc__saturate(car->controls.handbrake));
+  /* Handbrake acts on rear axle (x<0) */
+  if(car->controls.handbrake > 0.0f && car->desc.wheels[i].position_local[0] < 0.0f) cmd = fmaxf(cmd, lcc__saturate(car->controls.handbrake));
   float T = cmd * br->max_torque_nm;
   return fmaxf(0.0f, T);
 }
@@ -2185,7 +2125,7 @@ static void lcc__suspension_update(lcc_car_t *car, float dt) {
   /* approximate roll from lateral load difference */
   float FzL = 0.0f, FzR = 0.0f;
   for(int i = 0; i < car->wheel_count; ++i)
-    if(car->desc.wheels[i].position_local[0] < 0.0f) FzL += car->wheel_states[i].normal_force_n;
+    if(car->desc.wheels[i].position_local[1] < 0.0f) FzL += car->wheel_states[i].normal_force_n;
     else
       FzR += car->wheel_states[i].normal_force_n;
   float dF                            = FzR - FzL;
@@ -2299,7 +2239,7 @@ lcc_result_t lcc_car_step(lcc_car_t *car, float dt_s) {
   }
 
   /* clutch engagement from control or auto-clutch during shift */
-  float clutch_cmd = 1.0f - car->controls.clutch; /* driver clutch: 1 engaged */
+  float clutch_cmd = car->trans_state.gear_index != LCC_GEAR_NEUTRAL ? 1.0f - car->controls.clutch : 0.0f; /* driver clutch: 1 engaged */
   if(car->desc.ecu.auto_clutch && car->trans_state.shifting) {
     float half  = 0.5f * car->desc.transmission.shift_time_s;
     float t     = car->shift_timer_s;
@@ -2322,7 +2262,7 @@ lcc_result_t lcc_car_step(lcc_car_t *car, float dt_s) {
 
   /* driveline ratios */
   float gear_ratio = 0.0f;
-  if(car->trans_state.gear_index >= 0 && car->trans_state.gear_index < car->desc.transmission.gear_count)
+  if(car->trans_state.gear_index >= 0 && car->trans_state.gear_index < car->desc.transmission.gear_count) /* TODO: remove this */
     gear_ratio = car->desc.transmission.gear_ratios[car->trans_state.gear_index];
   float final_drive   = car->desc.transmission.final_drive_ratio;
   float driveline_eff = lcc__driveline_efficiency(car);
@@ -2338,6 +2278,7 @@ lcc_result_t lcc_car_step(lcc_car_t *car, float dt_s) {
   float avg_omega             = (count_driven > 0) ? (sum_omega_driven / (float)count_driven) : 0.0f;
   float shaft_out_rpm         = lcc__radps_to_rpm(avg_omega) * fmaxf(0.1f, final_drive);
   car->trans_state.output_rpm = shaft_out_rpm;
+  /* NOTE: output_rpm can be negative when reversing */
 
   /* engine model */
   float tq_engine = 0.0f;
@@ -2345,12 +2286,39 @@ lcc_result_t lcc_car_step(lcc_car_t *car, float dt_s) {
     if(car->controls.ignition_switch && car->controls.starter && car->elec_state.battery_soc > 0.05f && car->fuel_state.fuel_l > 0.01f)
       car->engine_state.rpm = lcc__lp(car->engine_state.rpm, car->desc.engine.idle_rpm, 4.0f, dt_s);
   } else {
-    float throttle_eff = car->controls.throttle;
-    /* tc engine cut */
+    /* effective throttle with idle control assist (acts on throttle, not engine speed) */
+    float throttle_eff = lcc__saturate(car->controls.throttle);
+
+    if(car->desc.ecu.idle_control && throttle_eff < 0.05f) {
+      /* simple PI on normalized rpm error */
+      float rpm_target = car->desc.engine.idle_rpm;
+      float err_rpm    = rpm_target - car->engine_state.rpm;
+      float norm_err   = err_rpm / fmaxf(500.0f, rpm_target); /* keep gains in a sane range */
+      float P          = car->desc.ecu.idle_pid_p;
+      float I          = car->desc.ecu.idle_pid_i;
+
+      car->idle_i += I * norm_err * dt_s;
+      car->idle_i    = lcc__clampf(car->idle_i, 0.0f, 0.3f); /* prevent runaway */
+      float idle_cmd = P * norm_err + car->idle_i;
+
+      /* limit authority when in gear with clutch engaged to allow creep or stall */
+      int   in_neutral = (car->trans_state.gear_index == LCC_GEAR_NEUTRAL) || (lcc__absf(gear_ratio) < 1e-3f);
+      float clutch_eng = car->trans_state.clutch_engagement;
+      float idle_max   = (in_neutral || clutch_eng < 0.2f) ? 0.30f : 0.12f;
+      float idle_thr   = lcc__clampf(idle_cmd, 0.0f, idle_max);
+
+      if(idle_thr > throttle_eff) throttle_eff = idle_thr;
+      /* mild anti-windup: decay integrator if driver applies throttle */
+    } else {
+      car->idle_i *= 0.9f;
+    }
+
+    /* traction control cut */
     throttle_eff *= (1.0f - car->tc_cut);
     car->engine_state.throttle_effective = throttle_eff;
 
-    tq_engine = lcc__engine_torque_compute(car, car->engine_state.rpm, throttle_eff, &car->engine_state.manifold_pressure_kpa);
+    tq_engine                   = lcc__engine_torque_compute(car, car->engine_state.rpm, throttle_eff, &car->engine_state.manifold_pressure_kpa);
+    car->engine_state.torque_nm = tq_engine;
 
     if(car->fuel_state.fuel_l <= 0.001f) {
       tq_engine                 = 0.0f;
@@ -2363,7 +2331,7 @@ lcc_result_t lcc_car_step(lcc_car_t *car, float dt_s) {
   float eng_rpm    = car->engine_state.rpm;
   float T_to_trans = 0.0f;
   if(car->desc.transmission.clutch == LCC_CLUTCH_TORQUE_CONVERTER) {
-    float target_input_rpm          = lcc__absf(gear_ratio) > 1e-3f ? lcc__absf(gear_ratio) * shaft_out_rpm : 0.0f;
+    float target_input_rpm          = lcc__absf(gear_ratio) > 1e-3f ? gear_ratio * shaft_out_rpm : 0.0f;
     float SR                        = (eng_rpm > 1.0f) ? lcc__clampf(target_input_rpm / fmaxf(1.0f, eng_rpm), 0.0f, 1.0f) : 0.0f;
     float stall_ratio               = 2.2f;
     float mult                      = 1.0f + (stall_ratio - 1.0f) * (1.0f - SR);
@@ -2426,8 +2394,8 @@ lcc_result_t lcc_car_step(lcc_car_t *car, float dt_s) {
   for(int i = 0; i < car->wheel_count; ++i) {
     float vtire[2];
     lcc__wheel_vel_tire_frame(car, i, vtire);
-    float Vlat  = vtire[0];
-    float Vlong = vtire[1];
+    float Vlong = vtire[0];
+    float Vlat  = vtire[1];
     float Fz    = fmaxf(0.0f, car->wheel_states[i].normal_force_n);
     mu_i[i]     = lcc__tire_mu(&car->desc.tires[i], Fz, car->env.global_friction_scale, car->damage_state.tire_health[i]);
     float Cx, Cy;
@@ -2520,7 +2488,6 @@ lcc_result_t lcc_car_step(lcc_car_t *car, float dt_s) {
 
   /* emit abs/tc events if active */
   int any_abs = 0;
-  int any_tc  = 0;
   for(int i = 0; i < car->wheel_count; ++i)
     if(car->abs_mod[i] < 0.999f) {
       any_abs = 1;
@@ -2553,20 +2520,39 @@ lcc_result_t lcc_car_step(lcc_car_t *car, float dt_s) {
     float r     = fmaxf(0.05f, wd->radius_m);
     float omega = ws->omega_radps;
 
-    float denom = fmaxf(0.5f, lcc__absf(Vlong));
-    float s     = (omega * r - Vlong) / denom;
-    s           = lcc__clampf(s, -3.0f, 3.0f);
-    float alpha = atan2f(Vlat, (lcc__absf(Vlong) > 0.05f) ? lcc__absf(Vlong) : 0.05f);
-    float Fz    = fmaxf(0.0f, ws->normal_force_n);
-    float mu    = lcc__tire_mu(td, Fz, car->env.global_friction_scale, car->damage_state.tire_health[i]);
+    /* slips */
+    float denom   = fmaxf(0.5f, lcc__absf(Vlong) + 1e-3f);
+    float s       = (omega * r - Vlong) / denom; /* traction-style */
+    float s_brake = (Vlong - omega * r) / denom; /* braking-style */
+    s             = lcc__clampf(s, -3.0f, 3.0f);
+    s_brake       = lcc__clampf(s_brake, -3.0f, 3.0f);
+
+    /* preserve sign of Vlong in slip angle */
+    float Vx_for_alpha = (lcc__absf(Vlong) > 0.05f) ? Vlong : (Vlong >= 0.0f ? 0.05f : -0.05f);
+    float alpha        = atan2f(Vlat, Vx_for_alpha);
+    float Fz           = fmaxf(0.0f, ws->normal_force_n);
+    float mu           = lcc__tire_mu(td, Fz, car->env.global_friction_scale, car->damage_state.tire_health[i]);
     float Cx, Cy;
     lcc__tire_stiffness(td, Fz, &Cx, &Cy);
 
+    /* oppose slip direction: with our s, +s => +Fx (thrust), -s => -Fx (drag) */
     float Fx0 = Cx * s;
     float Fy0 = -Cy * tanf(alpha);
+
+    /* rolling resistance opposes motion */
     float Frr = -td->rolling_resistance * Fz * lcc__signf(Vlong);
     Fx0 += Frr;
 
+    /* low-speed stick: don't let pure brakes at rest generate thrust */
+    if(car->car_state.speed_mps < 0.2f && lcc__absf(Vlong) < 0.2f && lcc__absf(omega * r) < 0.2f) {
+      Fx0 = 0.0f;
+      s   = 0.0f;
+      /* bring wheel speed toward rolling speed to avoid reverse spin */
+      float w_target = (denom > 0.0f) ? (Vlong / r) : 0.0f;
+      omega          = lcc__lp(omega, w_target, 50.0f, dt_s);
+    }
+
+    /* friction circle/ellipse */
     float Fcap  = mu * Fz;
     float mag0  = sqrtf(Fx0 * Fx0 + Fy0 * Fy0) + 1e-6f;
     float scale = fminf(1.0f, Fcap / mag0);
@@ -2577,10 +2563,12 @@ lcc_result_t lcc_car_step(lcc_car_t *car, float dt_s) {
     float Tdrive    = car->desc.wheels[i].driven ? Tw_cmd[i] : 0.0f;
     float Tbr       = lcc__wheel_brake_torque_base(car, i) + car->esc_extra_brake[i];
     Tbr             = lcc__abs_apply(car, i, Tbr, s, dt_s);
+    /* braking torque should oppose wheel rotation */
+    float Tbr_sign = (omega >= 0.0f) ? 1.0f : -1.0f;
 
     /* integrate wheel */
     float Iw     = fmaxf(0.01f, wd->inertia_kgm2);
-    float netT   = Tdrive - Tbr - T_contact;
+    float netT   = Tdrive - Tbr_sign * Tbr - T_contact;
     float domega = netT / Iw;
     omega += domega * dt_s;
 
@@ -2612,19 +2600,14 @@ lcc_result_t lcc_car_step(lcc_car_t *car, float dt_s) {
   F_body_sum[0] += drag_body[0];
   F_body_sum[1] += drag_body[1];
 
-  float g_body[2];
-  lcc__v2_rot(g_body, car->env.gravity_world, -car->car_state.yaw_rad);
-  F_body_sum[0] += car->car_state.mass_kg * g_body[0];
-  F_body_sum[1] += car->car_state.mass_kg * g_body[1];
-
   /* integrate rigid body */
-  float ax      = F_body_sum[1] / fmaxf(1.0f, car->car_state.mass_kg);
-  float ay      = F_body_sum[0] / fmaxf(1.0f, car->car_state.mass_kg);
+  float ax      = F_body_sum[0] / fmaxf(1.0f, car->car_state.mass_kg);
+  float ay      = F_body_sum[1] / fmaxf(1.0f, car->car_state.mass_kg);
   float Izz     = fmaxf(1.0f, car->desc.chassis.inertia_zz);
   float yaw_acc = Mz / Izz;
 
-  car->car_state.vel_body[0] += ay * dt_s;
-  car->car_state.vel_body[1] += ax * dt_s;
+  car->car_state.vel_body[0] += ax * dt_s; /* forward (x) */
+  car->car_state.vel_body[1] += ay * dt_s; /* lateral (y) */
 
   float vel_world_new[2];
   lcc__v2_rot(vel_world_new, car->car_state.vel_body, car->car_state.yaw_rad);
@@ -2638,34 +2621,40 @@ lcc_result_t lcc_car_step(lcc_car_t *car, float dt_s) {
   car->car_state.yaw_rad += car->car_state.yaw_rate_radps * dt_s;
 
   car->car_state.speed_mps   = lcc__v2_len(car->car_state.vel_world);
-  car->car_state.acc_body[0] = ay;
-  car->car_state.acc_body[1] = ax;
+  car->car_state.acc_body[0] = ax;
+  car->car_state.acc_body[1] = ay;
   float acc_world_new[2];
   lcc__v2_rot(acc_world_new, car->car_state.acc_body, car->car_state.yaw_rad);
   car->car_state.acc_world[0] = acc_world_new[0];
   car->car_state.acc_world[1] = acc_world_new[1];
 
-  car->car_state.beta_rad = atanf((lcc__absf(car->car_state.vel_body[1]) > 0.1f) ? (car->car_state.vel_body[0] / car->car_state.vel_body[1]) : 0.0f);
+  car->car_state.beta_rad = atan2f(car->car_state.vel_body[1], fmaxf(0.001f, car->car_state.vel_body[0]));
 
   car->trans_state.input_rpm  = car->engine_state.rpm;
   car->trans_state.output_rpm = shaft_out_rpm;
 
   /* engine speed dynamics */
   float eng_omega       = lcc__rpm_to_radps(car->engine_state.rpm);
-  float load_omega      = lcc__rpm_to_radps(lcc__absf(gear_ratio) * shaft_out_rpm);
+  float load_omega      = lcc__rpm_to_radps(lcc__absf(gear_ratio * shaft_out_rpm));
   float clutch_k        = (car->desc.transmission.clutch == LCC_CLUTCH_TORQUE_CONVERTER) ? 0.5f : lcc__saturate(car->trans_state.clutch_engagement);
   float Ieng            = fmaxf(0.02f, car->desc.engine.inertia_kgm2);
   float domega_eng_free = (tq_engine - T_to_trans) / Ieng;
   float domega_track    = (load_omega - eng_omega) * (6.0f * clutch_k);
   eng_omega += (domega_eng_free * (1.0f - clutch_k) + domega_track) * dt_s;
 
-  /* idle control support */
-  if(car->desc.ecu.idle_control && car->controls.throttle < 0.05f && car->engine_state.running) {
-    float w_idle = lcc__rpm_to_radps(car->desc.engine.idle_rpm);
-    eng_omega    = lcc__lp(eng_omega, w_idle, 2.0f, dt_s);
-  }
-
   car->engine_state.rpm = fmaxf(0.0f, lcc__radps_to_rpm(eng_omega));
+
+  /* stall detection: if rpm drops below stall under low driver demand */
+  if(car->engine_state.running) {
+    int in_gear    = (car->trans_state.gear_index != LCC_GEAR_NEUTRAL) && (lcc__absf(gear_ratio) > 1e-3f);
+    int clutch_eng = (car->trans_state.clutch_engagement > 0.7f);
+    if(car->engine_state.rpm < car->desc.engine.stall_rpm && (car->engine_state.throttle_effective < 0.05f) && (in_gear && clutch_eng)) {
+      car->engine_state.running   = 0;
+      car->engine_state.stalled   = 1;
+      car->engine_state.torque_nm = 0.0f;
+      lcc__emit_event(car, LCC_EVENT_ENGINE_STALL, 0, 0.0f);
+    }
+  }
 
   /* shift timing */
   if(car->trans_state.shifting) {
@@ -2903,8 +2892,8 @@ static void lcc__apply_to_wheels(lcc_car_t *car, const char *scope, void (*fn)(l
 
   int matched = 0;
   for(int i = 0; i < car->wheel_count; ++i) {
-    int is_front = (car->desc.wheels[i].position_local[1] >= 0.0f);
-    int is_left  = (car->desc.wheels[i].position_local[0] < 0.0f);
+    int is_front = (car->desc.wheels[i].position_local[0] >= 0.0f);
+    int is_left  = (car->desc.wheels[i].position_local[1] < 0.0f);
 
     if((apply_front || apply_rear || apply_left || apply_right)) {
       if((apply_front && !is_front) || (apply_rear && is_front)) continue;
@@ -3058,359 +3047,6 @@ int lcc_format_wheel_summary(const lcc_wheel_state_t *ws, char *out_str, int max
     "wheel: omega=%.2frad/s slip=%.1f%% alpha=%.1fdeg Fx=%.0fN Fy=%.0fN Fz=%.0fN Tdrv=%.0fNm Tbr=%.0fNm T=%.1fC wear=%.2f", ws->omega_radps,
     100.0f * ws->slip_ratio, lcc__rad2deg(ws->slip_angle_rad), ws->tire_force_long_n, ws->tire_force_lat_n, ws->normal_force_n, ws->drive_torque_nm,
     ws->brake_torque_nm, ws->tire_temp_c, ws->tire_wear);
-}
-
-/* =============================== serialization ================================= */
-
-#define LCC__SER_MAGIC 0x4C434353u /* 'L''C''C''S' */
-
-typedef struct lcc__ser_hdr_s {
-  uint32_t magic;
-  uint16_t vmaj, vmin, vpatch;
-  uint16_t flags;
-  uint16_t reserved;
-  uint32_t payload_size;
-} lcc__ser_hdr_t;
-
-static size_t lcc__ser_size_curve1d(const lcc_curve1d_t *c) {
-  int n = (c && c->points && c->count > 0) ? c->count : 0;
-  return sizeof(int32_t) + (size_t)n * sizeof(lcc_curve1d_point_t);
-}
-
-static size_t lcc__ser_size_map2d(const lcc_map2d_t *m) {
-  int n = (m && m->points && m->count > 0) ? m->count : 0;
-  return sizeof(int32_t) + (size_t)n * sizeof(lcc_map2d_point_t);
-}
-
-static int lcc__write_bytes(uint8_t **p, size_t *cap, const void *src, size_t n) {
-  if(*cap < n) return 0;
-  memcpy(*p, src, n);
-  *p += n;
-  *cap -= n;
-  return 1;
-}
-
-static int lcc__read_bytes(const uint8_t **p, size_t *cap, void *dst, size_t n) {
-  if(*cap < n) return 0;
-  memcpy(dst, *p, n);
-  *p += n;
-  *cap -= n;
-  return 1;
-}
-
-static int lcc__write_curve1d(uint8_t **p, size_t *cap, const lcc_curve1d_t *c) {
-  int32_t n = (c && c->points && c->count > 0) ? c->count : 0;
-  if(!lcc__write_bytes(p, cap, &n, sizeof(n))) return 0;
-  if(n > 0)
-    if(!lcc__write_bytes(p, cap, c->points, (size_t)n * sizeof(lcc_curve1d_point_t))) return 0;
-  return 1;
-}
-
-static int lcc__write_map2d(uint8_t **p, size_t *cap, const lcc_map2d_t *m) {
-  int32_t n = (m && m->points && m->count > 0) ? m->count : 0;
-  if(!lcc__write_bytes(p, cap, &n, sizeof(n))) return 0;
-  if(n > 0)
-    if(!lcc__write_bytes(p, cap, m->points, (size_t)n * sizeof(lcc_map2d_point_t))) return 0;
-  return 1;
-}
-
-static int lcc__read_curve1d(const uint8_t **p, size_t *cap, lcc_curve1d_point_t **out_pts, int *out_cnt) {
-  int32_t n = 0;
-  if(!lcc__read_bytes(p, cap, &n, sizeof(n))) return 0;
-  if(n < 0 || n > LCC_MAX_TORQUE_POINTS) return 0;
-  if(n == 0) {
-    *out_pts = NULL;
-    *out_cnt = 0;
-    return 1;
-  }
-  size_t               bytes = (size_t)n * sizeof(lcc_curve1d_point_t);
-  lcc_curve1d_point_t *pts   = (lcc_curve1d_point_t *)lcc__alloc(bytes, lcc__alloc_user);
-  if(!pts) return 0;
-  if(!lcc__read_bytes(p, cap, pts, bytes)) {
-    lcc__free(pts, lcc__alloc_user);
-    return 0;
-  }
-  *out_pts = pts;
-  *out_cnt = n;
-  return 1;
-}
-
-static int lcc__read_map2d(const uint8_t **p, size_t *cap, lcc_map2d_point_t **out_pts, int *out_cnt) {
-  int32_t n = 0;
-  if(!lcc__read_bytes(p, cap, &n, sizeof(n))) return 0;
-  if(n < 0 || n > LCC_MAX_MAP_POINTS_2D) return 0;
-  if(n == 0) {
-    *out_pts = NULL;
-    *out_cnt = 0;
-    return 1;
-  }
-  size_t             bytes = (size_t)n * sizeof(lcc_map2d_point_t);
-  lcc_map2d_point_t *pts   = (lcc_map2d_point_t *)lcc__alloc(bytes, lcc__alloc_user);
-  if(!pts) return 0;
-  if(!lcc__read_bytes(p, cap, pts, bytes)) {
-    lcc__free(pts, lcc__alloc_user);
-    return 0;
-  }
-  *out_pts = pts;
-  *out_cnt = n;
-  return 1;
-}
-
-lcc_result_t lcc_car_serialize(const lcc_car_t *car, void *buffer, size_t buffer_size, size_t *bytes_written) {
-  if(!car) return LCC_ERR_INVALID_ARG;
-
-  /* size computation */
-  size_t size = 0;
-  size += sizeof(lcc__ser_hdr_t);
-
-  /* descriptor copy with pointers nulled */
-  size += sizeof(lcc_car_desc_t);
-
-  /* current environment and controls and states */
-  size += sizeof(lcc_environment_t);
-  size += sizeof(lcc_controls_t);
-  size += sizeof(lcc_car_state_t);
-  size += sizeof(lcc_engine_state_t);
-  size += sizeof(lcc_ignition_state_t);
-  size += sizeof(lcc_transmission_state_t);
-  size += sizeof(lcc_diff_state_t) * 3;
-  size += sizeof(lcc_brake_state_t);
-  size += sizeof(lcc_suspension_state_t);
-  size += sizeof(lcc_electrics_state_t);
-  size += sizeof(lcc_fuel_state_t);
-  size += sizeof(lcc_cooling_state_t);
-  size += sizeof(lcc_exhaust_state_t);
-  size += sizeof(lcc_aero_state_t);
-  size += sizeof(int32_t); /* wheel states count */
-  size += (size_t)car->wheel_count * sizeof(lcc_wheel_state_t);
-  size += sizeof(lcc_damage_state_t);
-
-  /* dynamic curves/maps */
-  size += lcc__ser_size_curve1d(&car->desc.engine.wot_torque_nm_vs_rpm);
-  size += lcc__ser_size_curve1d(&car->desc.engine.friction_torque_nm_vs_rpm);
-  size += lcc__ser_size_curve1d(&car->desc.engine.throttle_map);
-  size += lcc__ser_size_map2d(&car->desc.engine.boost_pressure_kpa_vs_rpm_throttle);
-  size += lcc__ser_size_map2d(&car->desc.ignition.spark_advance_deg_vs_rpm_load);
-
-  if(bytes_written) *bytes_written = size;
-  if(!buffer) return LCC_OK;
-  if(buffer_size < size) return LCC_ERR_BOUNDS;
-
-  /* write */
-  uint8_t *p   = (uint8_t *)buffer;
-  size_t   cap = buffer_size;
-
-  lcc__ser_hdr_t hdr;
-  hdr.magic        = LCC__SER_MAGIC;
-  hdr.vmaj         = (uint16_t)LCC_VERSION_MAJOR;
-  hdr.vmin         = (uint16_t)LCC_VERSION_MINOR;
-  hdr.vpatch       = (uint16_t)LCC_VERSION_PATCH;
-  hdr.flags        = 0;
-  hdr.reserved     = 0;
-  hdr.payload_size = (uint32_t)(size - sizeof(lcc__ser_hdr_t));
-  if(!lcc__write_bytes(&p, &cap, &hdr, sizeof(hdr))) return LCC_ERR_BOUNDS;
-
-  /* descriptor copy with pointers cleared */
-  lcc_car_desc_t d                                   = car->desc;
-  d.engine.wot_torque_nm_vs_rpm.points               = NULL;
-  d.engine.friction_torque_nm_vs_rpm.points          = NULL;
-  d.engine.throttle_map.points                       = NULL;
-  d.engine.boost_pressure_kpa_vs_rpm_throttle.points = NULL;
-  d.ignition.spark_advance_deg_vs_rpm_load.points    = NULL;
-
-  if(!lcc__write_bytes(&p, &cap, &d, sizeof(d))) return LCC_ERR_BOUNDS;
-
-  /* runtime env and controls and states */
-  if(!lcc__write_bytes(&p, &cap, &car->env, sizeof(car->env))) return LCC_ERR_BOUNDS;
-  if(!lcc__write_bytes(&p, &cap, &car->controls, sizeof(car->controls))) return LCC_ERR_BOUNDS;
-  if(!lcc__write_bytes(&p, &cap, &car->car_state, sizeof(car->car_state))) return LCC_ERR_BOUNDS;
-  if(!lcc__write_bytes(&p, &cap, &car->engine_state, sizeof(car->engine_state))) return LCC_ERR_BOUNDS;
-  if(!lcc__write_bytes(&p, &cap, &car->ign_state, sizeof(car->ign_state))) return LCC_ERR_BOUNDS;
-  if(!lcc__write_bytes(&p, &cap, &car->trans_state, sizeof(car->trans_state))) return LCC_ERR_BOUNDS;
-  if(!lcc__write_bytes(&p, &cap, &car->front_diff_state, sizeof(car->front_diff_state))) return LCC_ERR_BOUNDS;
-  if(!lcc__write_bytes(&p, &cap, &car->rear_diff_state, sizeof(car->rear_diff_state))) return LCC_ERR_BOUNDS;
-  if(!lcc__write_bytes(&p, &cap, &car->center_diff_state, sizeof(car->center_diff_state))) return LCC_ERR_BOUNDS;
-  if(!lcc__write_bytes(&p, &cap, &car->brake_state, sizeof(car->brake_state))) return LCC_ERR_BOUNDS;
-  if(!lcc__write_bytes(&p, &cap, &car->susp_state, sizeof(car->susp_state))) return LCC_ERR_BOUNDS;
-  if(!lcc__write_bytes(&p, &cap, &car->elec_state, sizeof(car->elec_state))) return LCC_ERR_BOUNDS;
-  if(!lcc__write_bytes(&p, &cap, &car->fuel_state, sizeof(car->fuel_state))) return LCC_ERR_BOUNDS;
-  if(!lcc__write_bytes(&p, &cap, &car->cool_state, sizeof(car->cool_state))) return LCC_ERR_BOUNDS;
-  if(!lcc__write_bytes(&p, &cap, &car->exh_state, sizeof(car->exh_state))) return LCC_ERR_BOUNDS;
-  if(!lcc__write_bytes(&p, &cap, &car->aero_state, sizeof(car->aero_state))) return LCC_ERR_BOUNDS;
-
-  int32_t wc = car->wheel_count;
-  if(!lcc__write_bytes(&p, &cap, &wc, sizeof(wc))) return LCC_ERR_BOUNDS;
-  if(wc > 0)
-    if(!lcc__write_bytes(&p, &cap, car->wheel_states, (size_t)wc * sizeof(lcc_wheel_state_t))) return LCC_ERR_BOUNDS;
-
-  if(!lcc__write_bytes(&p, &cap, &car->damage_state, sizeof(car->damage_state))) return LCC_ERR_BOUNDS;
-
-  /* variable data: curves/maps */
-  if(!lcc__write_curve1d(&p, &cap, &car->desc.engine.wot_torque_nm_vs_rpm)) return LCC_ERR_BOUNDS;
-  if(!lcc__write_curve1d(&p, &cap, &car->desc.engine.friction_torque_nm_vs_rpm)) return LCC_ERR_BOUNDS;
-  if(!lcc__write_curve1d(&p, &cap, &car->desc.engine.throttle_map)) return LCC_ERR_BOUNDS;
-  if(!lcc__write_map2d(&p, &cap, &car->desc.engine.boost_pressure_kpa_vs_rpm_throttle)) return LCC_ERR_BOUNDS;
-  if(!lcc__write_map2d(&p, &cap, &car->desc.ignition.spark_advance_deg_vs_rpm_load)) return LCC_ERR_BOUNDS;
-
-  return LCC_OK;
-}
-
-lcc_result_t lcc_car_deserialize(lcc_car_t **car_out, const void *buffer, size_t buffer_size) {
-  if(!car_out || !buffer) return LCC_ERR_INVALID_ARG;
-  *car_out = NULL;
-
-  const uint8_t *p   = (const uint8_t *)buffer;
-  size_t         cap = buffer_size;
-
-  lcc__ser_hdr_t hdr;
-  if(!lcc__read_bytes(&p, &cap, &hdr, sizeof(hdr))) return LCC_ERR_BOUNDS;
-  if(hdr.magic != LCC__SER_MAGIC) return LCC_ERR_UNSUPPORTED;
-  if(hdr.vmaj != LCC_VERSION_MAJOR) return LCC_ERR_UNSUPPORTED; /* strict major match */
-
-  lcc_car_desc_t desc;
-  if(!lcc__read_bytes(&p, &cap, &desc, sizeof(desc))) return LCC_ERR_BOUNDS;
-
-  /* read runtime env & states */
-  lcc_environment_t        env;
-  lcc_controls_t           controls;
-  lcc_car_state_t          car_state;
-  lcc_engine_state_t       engine_state;
-  lcc_ignition_state_t     ign_state;
-  lcc_transmission_state_t trans_state;
-  lcc_diff_state_t         front_diff_state, rear_diff_state, center_diff_state;
-  lcc_brake_state_t        brake_state;
-  lcc_suspension_state_t   susp_state;
-  lcc_electrics_state_t    elec_state;
-  lcc_fuel_state_t         fuel_state;
-  lcc_cooling_state_t      cool_state;
-  lcc_exhaust_state_t      exh_state;
-  lcc_aero_state_t         aero_state;
-  int32_t                  wc = 0;
-
-  if(!lcc__read_bytes(&p, &cap, &env, sizeof(env))) return LCC_ERR_BOUNDS;
-  if(!lcc__read_bytes(&p, &cap, &controls, sizeof(controls))) return LCC_ERR_BOUNDS;
-  if(!lcc__read_bytes(&p, &cap, &car_state, sizeof(car_state))) return LCC_ERR_BOUNDS;
-  if(!lcc__read_bytes(&p, &cap, &engine_state, sizeof(engine_state))) return LCC_ERR_BOUNDS;
-  if(!lcc__read_bytes(&p, &cap, &ign_state, sizeof(ign_state))) return LCC_ERR_BOUNDS;
-  if(!lcc__read_bytes(&p, &cap, &trans_state, sizeof(trans_state))) return LCC_ERR_BOUNDS;
-  if(!lcc__read_bytes(&p, &cap, &front_diff_state, sizeof(front_diff_state))) return LCC_ERR_BOUNDS;
-  if(!lcc__read_bytes(&p, &cap, &rear_diff_state, sizeof(rear_diff_state))) return LCC_ERR_BOUNDS;
-  if(!lcc__read_bytes(&p, &cap, &center_diff_state, sizeof(center_diff_state))) return LCC_ERR_BOUNDS;
-  if(!lcc__read_bytes(&p, &cap, &brake_state, sizeof(brake_state))) return LCC_ERR_BOUNDS;
-  if(!lcc__read_bytes(&p, &cap, &susp_state, sizeof(susp_state))) return LCC_ERR_BOUNDS;
-  if(!lcc__read_bytes(&p, &cap, &elec_state, sizeof(elec_state))) return LCC_ERR_BOUNDS;
-  if(!lcc__read_bytes(&p, &cap, &fuel_state, sizeof(fuel_state))) return LCC_ERR_BOUNDS;
-  if(!lcc__read_bytes(&p, &cap, &cool_state, sizeof(cool_state))) return LCC_ERR_BOUNDS;
-  if(!lcc__read_bytes(&p, &cap, &exh_state, sizeof(exh_state))) return LCC_ERR_BOUNDS;
-  if(!lcc__read_bytes(&p, &cap, &aero_state, sizeof(aero_state))) return LCC_ERR_BOUNDS;
-
-  if(!lcc__read_bytes(&p, &cap, &wc, sizeof(wc))) return LCC_ERR_BOUNDS;
-  if(wc < 0 || wc > LCC_MAX_WHEELS) return LCC_ERR_BOUNDS;
-
-  lcc_wheel_state_t tmp_wheels[LCC_MAX_WHEELS];
-  if(wc > 0) {
-    size_t bytes = (size_t)wc * sizeof(lcc_wheel_state_t);
-    if(!lcc__read_bytes(&p, &cap, tmp_wheels, bytes)) return LCC_ERR_BOUNDS;
-  }
-
-  lcc_damage_state_t damage_state;
-  if(!lcc__read_bytes(&p, &cap, &damage_state, sizeof(damage_state))) return LCC_ERR_BOUNDS;
-
-  /* curves/maps */
-  lcc_curve1d_point_t *wot_pts = NULL, *fric_pts = NULL, *thrt_pts = NULL;
-  int                  wot_cnt = 0, fric_cnt = 0, thrt_cnt = 0;
-  lcc_map2d_point_t   *boost_pts = NULL, *spark_pts = NULL;
-  int                  boost_cnt = 0, spark_cnt = 0;
-
-  if(!lcc__read_curve1d(&p, &cap, &wot_pts, &wot_cnt)) goto fail_read;
-  if(!lcc__read_curve1d(&p, &cap, &fric_pts, &fric_cnt)) goto fail_read;
-  if(!lcc__read_curve1d(&p, &cap, &thrt_pts, &thrt_cnt)) goto fail_read;
-  if(!lcc__read_map2d(&p, &cap, &boost_pts, &boost_cnt)) goto fail_read;
-  if(!lcc__read_map2d(&p, &cap, &spark_pts, &spark_cnt)) goto fail_read;
-
-  /* attach to descriptor before create */
-  desc.engine.wot_torque_nm_vs_rpm.points               = wot_pts;
-  desc.engine.wot_torque_nm_vs_rpm.count                = wot_cnt;
-  desc.engine.friction_torque_nm_vs_rpm.points          = fric_pts;
-  desc.engine.friction_torque_nm_vs_rpm.count           = fric_cnt;
-  desc.engine.throttle_map.points                       = thrt_pts;
-  desc.engine.throttle_map.count                        = thrt_cnt;
-  desc.engine.boost_pressure_kpa_vs_rpm_throttle.points = boost_pts;
-  desc.engine.boost_pressure_kpa_vs_rpm_throttle.count  = boost_cnt;
-  desc.ignition.spark_advance_deg_vs_rpm_load.points    = spark_pts;
-  desc.ignition.spark_advance_deg_vs_rpm_load.count     = spark_cnt;
-
-  /* create car */
-  lcc_car_t *car = lcc_car_create(&desc);
-  if(!car) goto fail_create;
-
-  /* mark ownership of dynamic data so destroy() frees them */
-  car->own_wot_pts   = wot_pts;
-  car->own_wot_cnt   = wot_cnt;
-  car->own_fric_pts  = fric_pts;
-  car->own_fric_cnt  = fric_cnt;
-  car->own_thrt_pts  = thrt_pts;
-  car->own_thrt_cnt  = thrt_cnt;
-  car->own_boost_pts = boost_pts;
-  car->own_boost_cnt = boost_cnt;
-  car->own_spark_pts = spark_pts;
-  car->own_spark_cnt = spark_cnt;
-
-  /* restore runtime env, controls and states */
-  car->env      = env;
-  car->controls = controls;
-
-  car->car_state         = car_state;
-  car->engine_state      = engine_state;
-  car->ign_state         = ign_state;
-  car->trans_state       = trans_state;
-  car->front_diff_state  = front_diff_state;
-  car->rear_diff_state   = rear_diff_state;
-  car->center_diff_state = center_diff_state;
-  car->brake_state       = brake_state;
-  car->susp_state        = susp_state;
-  car->elec_state        = elec_state;
-  car->fuel_state        = fuel_state;
-  car->cool_state        = cool_state;
-  car->exh_state         = exh_state;
-  car->aero_state        = aero_state;
-
-  car->wheel_count = desc.wheel_count;
-  int ncopy        = lcc__mini(wc, car->wheel_count);
-  for(int i = 0; i < ncopy; ++i) car->wheel_states[i] = tmp_wheels[i];
-
-  car->damage_state = damage_state;
-
-  /* recompute derived bits */
-  car->total_mass_kg      = car->car_state.mass_kg;
-  car->pending_gear_index = car->trans_state.gear_index;
-  car->shift_timer_s      = 0.0f;
-  car->tc_cut             = 0.0f;
-  memset(car->abs_mod, 0, sizeof(car->abs_mod));
-  for(int i = 0; i < car->wheel_count; ++i) car->abs_mod[i] = 1.0f;
-  memset(car->esc_extra_brake, 0, sizeof(car->esc_extra_brake));
-
-  lcc__compute_static_loads(car);
-
-  *car_out = car;
-  return LCC_OK;
-
-fail_create:
-  /* free on failure (car not created) */
-  if(wot_pts) lcc__free(wot_pts, lcc__alloc_user);
-  if(fric_pts) lcc__free(fric_pts, lcc__alloc_user);
-  if(thrt_pts) lcc__free(thrt_pts, lcc__alloc_user);
-  if(boost_pts) lcc__free(boost_pts, lcc__alloc_user);
-  if(spark_pts) lcc__free(spark_pts, lcc__alloc_user);
-  return LCC_ERR_OUT_OF_MEMORY;
-
-fail_read:
-  if(wot_pts) lcc__free(wot_pts, lcc__alloc_user);
-  if(fric_pts) lcc__free(fric_pts, lcc__alloc_user);
-  if(thrt_pts) lcc__free(thrt_pts, lcc__alloc_user);
-  if(boost_pts) lcc__free(boost_pts, lcc__alloc_user);
-  if(spark_pts) lcc__free(spark_pts, lcc__alloc_user);
-  return LCC_ERR_BOUNDS;
 }
 
 #endif
