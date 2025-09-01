@@ -19,3 +19,7 @@ time = { version = "0.3", features = ["formatting"] }
 
 [build-dependencies]
 bindgen = "0.72"
+cc = "1.0"
+
+[features]
+link-system = []
