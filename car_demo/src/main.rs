@@ -867,11 +867,6 @@ impl App {
             let mut mu = self.desc.tires[i].mu_nominal + self.desc.tires[i].load_sensitivity * fz;
             mu = mu.clamp(0.2, 3.0);
             mu *= self.env.global_friction_scale.clamp(0.1, 2.0);
-            if w.contact.override_enabled != 0 {
-                let mu_cp = w.contact.mu_dynamic.clamp(0.1, 3.0);
-                // choose to only reduce grip if contact says so:
-                mu = mu.min(mu_cp);
-            }
             (mu, mu * fz)
         };
 

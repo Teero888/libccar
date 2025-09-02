@@ -190,9 +190,6 @@ typedef struct lcc_environment_s {
 
 typedef struct lcc_contact_patch_s {
   lcc_bool_t override_enabled;
-  float      mu_dynamic;
-  float      mu_static;
-  float      rolling_resistance;
   float      surface_vel_world[2];
   float      slip_scale_long;
   float      slip_scale_lat;
@@ -499,12 +496,6 @@ typedef struct lcc_transmission_state_s {
   float      converter_slip;
   lcc_bool_t shifting;
 } lcc_transmission_state_t;
-
-typedef struct lcc_diff_state_s {
-  float left_shaft_torque_nm;
-  float right_shaft_torque_nm;
-  float lock_fraction;
-} lcc_diff_state_t;
 
 typedef struct lcc_brake_state_s {
   float temp_c[LCC_MAX_WHEELS];
@@ -868,10 +859,6 @@ static float lcc__rad2deg(float r) {
   return r * (180.0f / LCC_PI);
 }
 
-static float lcc__sqrf(float v) {
-  return v * v;
-}
-
 static float lcc__hypot2(float x, float y) {
   return sqrtf(x * x + y * y);
 }
@@ -980,9 +967,6 @@ struct lcc_car_s {
   lcc_engine_state_t       engine_state;
   lcc_ignition_state_t     ign_state;
   lcc_transmission_state_t trans_state;
-  lcc_diff_state_t         front_diff_state;
-  lcc_diff_state_t         rear_diff_state;
-  lcc_diff_state_t         center_diff_state;
   lcc_brake_state_t        brake_state;
   lcc_suspension_state_t   susp_state;
   lcc_electrics_state_t    elec_state;
@@ -996,7 +980,6 @@ struct lcc_car_s {
   int   wheel_count;
   float wheel_steer_rad[LCC_MAX_WHEELS];
   float wheel_static_load_n[LCC_MAX_WHEELS];
-  float total_mass_kg;
 
   float shift_timer_s;
   int   pending_gear_index;
@@ -1022,8 +1005,6 @@ struct lcc_car_s {
   double last_abs_evt_time;
   double last_tc_evt_time;
   double last_esc_evt_time;
-
-  char version_str[32];
 };
 
 /* ----------------------------------------------------------------------------------------- */
@@ -1418,9 +1399,6 @@ static void lcc__init_runtime(lcc_car_t *car) {
   memset(&car->engine_state, 0, sizeof(car->engine_state));
   memset(&car->ign_state, 0, sizeof(car->ign_state));
   memset(&car->trans_state, 0, sizeof(car->trans_state));
-  memset(&car->front_diff_state, 0, sizeof(car->front_diff_state));
-  memset(&car->rear_diff_state, 0, sizeof(car->rear_diff_state));
-  memset(&car->center_diff_state, 0, sizeof(car->center_diff_state));
   memset(&car->brake_state, 0, sizeof(car->brake_state));
   memset(&car->susp_state, 0, sizeof(car->susp_state));
   memset(&car->elec_state, 0, sizeof(car->elec_state));
@@ -1444,14 +1422,11 @@ static void lcc__init_runtime(lcc_car_t *car) {
   for(int i = 0; i < car->wheel_count; ++i) {
     car->wheel_states[i].pressure_kpa                 = car->desc.tires[i].pressure_kpa;
     car->wheel_states[i].contact.override_enabled     = 0;
-    car->wheel_states[i].contact.mu_dynamic           = 1.00f * car->env.global_friction_scale;
-    car->wheel_states[i].contact.mu_static            = 1.10f * car->env.global_friction_scale;
-    car->wheel_states[i].contact.rolling_resistance   = car->desc.tires[i].rolling_resistance;
     car->wheel_states[i].contact.surface_vel_world[0] = 0.0f;
     car->wheel_states[i].contact.surface_vel_world[1] = 0.0f;
     car->wheel_states[i].contact.slip_scale_long      = 1.0f;
     car->wheel_states[i].contact.slip_scale_lat       = 1.0f;
-    car->wheel_states[i].contact.override_enabled     = 0;
+
     lcc__v2_zero(car->wheel_states[i].patch_world_pos);
     car->wheel_steer_rad[i]                = 0.0f;
     car->brake_state.temp_c[i]             = car->env.ambient_temp_c;
@@ -1489,7 +1464,6 @@ static void lcc__init_runtime(lcc_car_t *car) {
   car->elec_state.consumers_headlights = 0;
 
   car->car_state.mass_kg = car->desc.chassis.mass_kg + fuel_mass;
-  car->total_mass_kg     = car->car_state.mass_kg;
 
   car->engine_state.running               = 0;
   car->engine_state.stalled               = 0;
@@ -1778,7 +1752,6 @@ static void lcc__compute_normal_loads(lcc_car_t *car, float df_front, float df_r
 typedef struct lcc_axle_torques_s {
   float left_nm;
   float right_nm;
-  float delivered_nm;
 } lcc_axle_torques_t;
 
 static lcc_axle_torques_t lcc__diff_open(float T_in, float Tlim_L, float Tlim_R) {
@@ -1792,7 +1765,6 @@ static lcc_axle_torques_t lcc__diff_open(float T_in, float Tlim_L, float Tlim_R)
   float              TR   = fminf(half, TRc);
   r.left_nm               = s * TL;
   r.right_nm              = s * TR;
-  r.delivered_nm          = s * (TL + TR);
   return r;
 }
 
@@ -1811,9 +1783,8 @@ static lcc_axle_torques_t lcc__diff_locked(float T_in, float Tlim_L, float Tlim_
   float spareR = fmaxf(0.0f, TRcap - TR);
   float dR     = fminf(spareR, rem - dL);
   TR += dR;
-  r.left_nm      = s * TL;
-  r.right_nm     = s * TR;
-  r.delivered_nm = s * (TL + TR);
+  r.left_nm  = s * TL;
+  r.right_nm = s * TR;
   return r;
 }
 
@@ -1836,7 +1807,6 @@ static lcc_axle_torques_t lcc__diff_torsen(float T_in, float Tlim_L, float Tlim_
     r.left_nm  = s * Thigh;
     r.right_nm = s * Tlow;
   }
-  r.delivered_nm = s * (lcc__absf(r.left_nm) + lcc__absf(r.right_nm));
   return r;
 }
 
@@ -1855,7 +1825,6 @@ static lcc_axle_torques_t lcc__diff_active(float T_in, float Tlim_L, float Tlim_
   float add            = 0.5f * preload_nm;
   r.left_nm            = fminf(r.left_nm + add, Tlim_L);
   r.right_nm           = fminf(r.right_nm + add, Tlim_R);
-  r.delivered_nm       = r.left_nm + r.right_nm;
   return r;
 }
 
@@ -1935,7 +1904,7 @@ static void lcc__tc_update(lcc_car_t *car, float max_pos_slip, float dt) {
 }
 
 /* esc yaw control -> additional brake torque distribution */
-static void lcc__esc_update(lcc_car_t *car, float dt) {
+static void lcc__esc_update(lcc_car_t *car) {
   for(int i = 0; i < car->wheel_count; ++i) car->esc_extra_brake[i] = 0.0f;
   if(car->desc.ecu.esc_mode == LCC_ESC_OFF) return;
 
@@ -1988,8 +1957,6 @@ lcc_car_t *lcc_car_create(const lcc_car_desc_t *desc) {
   car->desc        = *desc;
   car->wheel_count = car->desc.wheel_count;
   car->env         = desc->environment;
-
-  snprintf(car->version_str, sizeof(car->version_str), "%d.%d.%d", LCC_VERSION_MAJOR, LCC_VERSION_MINOR, LCC_VERSION_PATCH);
 
   lcc__init_runtime(car);
   return car;
@@ -2137,7 +2104,6 @@ lcc_result_t lcc_car_request_gear(lcc_car_t *car, int gear_index) {
   car->pending_gear_index   = gear_index;
   car->trans_state.shifting = 1;
   car->shift_timer_s        = lcc__clampf(car->desc.transmission.shift_time_s, 0.05f, 1.0f);
-  printf("Requesting gear %d, shift_timer_s: %.2f\n", gear_index, car->shift_timer_s);
   return LCC_OK;
 }
 
@@ -2145,7 +2111,6 @@ lcc_result_t lcc_car_shift_up(lcc_car_t *car) {
   if(!car) return LCC_ERR_INVALID_ARG;
   int next = car->trans_state.gear_index + 1;
   if(next >= car->desc.transmission.gear_count) next = car->desc.transmission.gear_count - 1;
-  printf("Shifting up to %d\n", next);
   return lcc_car_request_gear(car, next);
 }
 
@@ -2154,7 +2119,6 @@ lcc_result_t lcc_car_shift_down(lcc_car_t *car) {
   int next     = car->trans_state.gear_index - 1;
   int min_gear = car->desc.transmission.type != LCC_TRANS_MANUAL ? 2 : 0;
   if(next < min_gear) next = min_gear;
-  printf("Shifting down to %d\n", next);
   return lcc_car_request_gear(car, next);
 }
 
@@ -2167,7 +2131,6 @@ lcc_result_t lcc_car_refuel(lcc_car_t *car, float liters) {
   car->fuel_state.fuel_l = new_l > cap ? cap : new_l;
   float fuel_mass        = car->fuel_state.fuel_l * car->desc.fuel.fuel_density_kg_per_l;
   car->car_state.mass_kg = car->desc.chassis.mass_kg + fuel_mass;
-  car->total_mass_kg     = car->car_state.mass_kg;
   lcc__compute_static_loads(car);
   return LCC_OK;
 }
@@ -2179,7 +2142,6 @@ lcc_result_t lcc_car_set_fuel(lcc_car_t *car, float liters) {
   car->fuel_state.fuel_l = liters;
   float fuel_mass        = car->fuel_state.fuel_l * car->desc.fuel.fuel_density_kg_per_l;
   car->car_state.mass_kg = car->desc.chassis.mass_kg + fuel_mass;
-  car->total_mass_kg     = car->car_state.mass_kg;
   lcc__compute_static_loads(car);
   return LCC_OK;
 }
@@ -2595,16 +2557,16 @@ lcc_result_t lcc_car_step(lcc_car_t *car, float dt_s) {
       if(riR < 0 && car->desc.wheels[i].position_local[1] > 0.0f) riR = i;
     }
   }
-  // Per-wheel longitudinal capacity from friction circle
+  /* per-wheel longitudinal capacity from friction circle */
   float Tlim[LCC_MAX_WHEELS] = { 0 };
 
   for(int i = 0; i < car->wheel_count; ++i) {
-    float D      = fmaxf(0.0f, mu_i[i]) * fmaxf(0.0f, Fz_i[i]);               // friction circle radius (N)
-    float Fy_est = lcc__pacejka_Fy_pure(a_eff[i], mu_i[i], Fz_i[i], Cy_i[i]); // lateral demand from slip angle only
+    float D      = fmaxf(0.0f, mu_i[i]) * fmaxf(0.0f, Fz_i[i]);               /* friction circle radius (N) */
+    float Fy_est = lcc__pacejka_Fy_pure(a_eff[i], mu_i[i], Fz_i[i], Cy_i[i]); /* lateral demand from slip angle only */
     Fy_est       = lcc__clampf(Fy_est, -D, D);
-    float Fx_cap = sqrtf(fmaxf(0.0f, D * D - Fy_est * Fy_est)); // remaining room for Fx (N)
+    float Fx_cap = sqrtf(fmaxf(0.0f, D * D - Fy_est * Fy_est)); /* remaining room for Fx (N) */
 
-    Tlim[i] = Fx_cap * r_i[i]; // convert to Nm (cap at contact patch)
+    Tlim[i] = Fx_cap * r_i[i]; /* convert to Nm (cap at contact patch) */
   }
   /* torque split */
   lcc_axle_torques_t axleF = (lcc_axle_torques_t){ 0 }, axleR = (lcc_axle_torques_t){ 0 };
@@ -2637,7 +2599,7 @@ lcc_result_t lcc_car_step(lcc_car_t *car, float dt_s) {
   if(riR >= 0) Tw_cmd[riR] = axleR.right_nm;
 
   /* ESC yaw update (computes extra brake torque on outside) */
-  lcc__esc_update(car, dt_s);
+  lcc__esc_update(car);
 
   /* integrate wheels and accumulate body forces/moment */
   float F_body_sum[2] = { 0.0f, 0.0f };
@@ -2668,27 +2630,8 @@ lcc_result_t lcc_car_step(lcc_car_t *car, float dt_s) {
     float Fx_pure = lcc__pacejka_Fx_pure(s, mu_eff, Fz, Kx);
     float Fy_pure = lcc__pacejka_Fy_pure(a, mu_eff, Fz, Ky);
 
-    /* Combined-slip reduction (ellipse-based) */
+    /* no additional combined-slip scaling (simple for now) */
     float Fx0 = Fx_pure, Fy0 = Fy_pure;
-    // {
-    //   float D = fmaxf(0.0f, mu_eff) * fmaxf(0.0f, Fz);
-    //   if(D > 1e-6f) {
-    //     float gx = sqrtf(fmaxf(0.0f, 1.0f - lcc__sqrf(Fy_pure / D)));
-    //     float gy = sqrtf(fmaxf(0.0f, 1.0f - lcc__sqrf(Fx_pure / D)));
-    //     Fx0      = Fx_pure * gx;
-    //     Fy0      = Fy_pure * gy;
-    //     /* tiny safety clamp if any overshoot */
-    //     float mag = sqrtf(Fx0 * Fx0 + Fy0 * Fy0);
-    //     if(mag > 1.01f * D && mag > 1e-6f) {
-    //       float scc = (D / mag);
-    //       Fx0 *= scc;
-    //       Fy0 *= scc;
-    //     }
-    //   } else {
-    //     Fx0 = 0.0f;
-    //     Fy0 = 0.0f;
-    //   }
-    // }
 
     /* rolling resistance (smooth sign) */
     float sgn_v = Vx / (fabsf(Vx) + 0.05f);
@@ -2757,7 +2700,6 @@ lcc_result_t lcc_car_step(lcc_car_t *car, float dt_s) {
     {
       float denom_te = fmaxf(0.3f, fmaxf(fabsf(Vx), fabsf(ws->omega_radps * r)));
       float s_te     = (ws->omega_radps * r - Vx) / denom_te;
-      //if(car->car_state.speed_mps < 0.2f && fabsf(Vx) < 0.2f && fabsf(ws->omega_radps * r) < 0.2f) s_te = 0.0f;
 
       ws->slip_ratio        = lcc__clampf(s_te, -3.0f, 3.0f);
       ws->slip_angle_rad    = a;
