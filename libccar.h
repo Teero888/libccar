@@ -470,7 +470,6 @@ LCC_API void lcc_car_set_environment(lcc_car_t *car, const lcc_environment_t *en
 LCC_API void lcc_car_get_environment(const lcc_car_t *car, lcc_environment_t *env_out);
 
 LCC_API lcc_result_t lcc_car_set_engine_map(lcc_car_t *car, const lcc_curve1d_t *wot_torque, const lcc_curve1d_t *friction);
-LCC_API lcc_result_t lcc_car_set_ignition_map(lcc_car_t *car, const lcc_map2d_t *spark);
 LCC_API lcc_result_t lcc_car_set_boost_map(lcc_car_t *car, const lcc_map2d_t *boost);
 LCC_API lcc_result_t lcc_car_set_gear_ratios(lcc_car_t *car, const float *gear_ratios, int gear_count, float final_drive);
 LCC_API lcc_result_t lcc_car_set_diff_params(lcc_car_t *car, lcc_diff_type_t front, lcc_diff_type_t rear, float preload_nm, float bias_ratio);
@@ -496,9 +495,9 @@ LCC_API void lcc_car_set_abs(lcc_car_t *car, lcc_abs_mode_t mode);
 LCC_API void lcc_car_set_tc(lcc_car_t *car, lcc_tc_mode_t mode);
 LCC_API void lcc_car_set_esc(lcc_car_t *car, lcc_esc_mode_t mode);
 
-/* pose and velocity */
-LCC_API void lcc_car_set_pose(lcc_car_t *car, const float pos_world[2], float yaw_rad);
-LCC_API void lcc_car_get_pose(const lcc_car_t *car, float pos_world_out[2], float *yaw_rad_out);
+/* pos and velocity */
+LCC_API void lcc_car_set_pos(lcc_car_t *car, const float pos_world[2], float yaw_rad);
+LCC_API void lcc_car_get_pos(const lcc_car_t *car, float pos_world_out[2], float *yaw_rad_out);
 LCC_API void lcc_car_set_velocity(lcc_car_t *car, const float vel_world[2], float yaw_rate_radps);
 LCC_API void lcc_car_get_velocity(const lcc_car_t *car, float vel_world_out[2], float *yaw_rate_radps_out);
 
@@ -566,45 +565,6 @@ static const lcc_curve1d_point_t LCC__DEF_ENGINE_FRICTION_POINTS[] = { { 600.0f,
   { 4000.0f, 30.0f }, { 5000.0f, 36.0f }, { 6000.0f, 42.0f }, { 7000.0f, 49.0f } };
 static const lcc_curve1d_point_t LCC__DEF_THROTTLE_MAP_POINTS[]    = { { 0.0f, 0.0f }, { 0.25f, 0.25f }, { 0.5f, 0.5f }, { 0.75f, 0.75f },
      { 1.0f, 1.0f } };
-/* simple spark advance map (rpm vs. load(throttle 0..1) -> deg BTDC) */
-static const lcc_map2d_point_t LCC__DEF_SPARK_MAP_POINTS[] = {
-  /* rpm,  load, advance_deg */
-  { 800.0f, 0.10f, 14.0f },
-  { 800.0f, 0.30f, 12.0f },
-  { 800.0f, 0.50f, 10.0f },
-  { 800.0f, 0.70f, 9.0f },
-  { 800.0f, 1.00f, 8.0f },
-  { 1500.0f, 0.10f, 22.0f },
-  { 1500.0f, 0.30f, 20.0f },
-  { 1500.0f, 0.50f, 18.0f },
-  { 1500.0f, 0.70f, 16.0f },
-  { 1500.0f, 1.00f, 14.0f },
-  { 2500.0f, 0.10f, 32.0f },
-  { 2500.0f, 0.30f, 30.0f },
-  { 2500.0f, 0.50f, 28.0f },
-  { 2500.0f, 0.70f, 24.0f },
-  { 2500.0f, 1.00f, 20.0f },
-  { 3500.0f, 0.10f, 36.0f },
-  { 3500.0f, 0.30f, 34.0f },
-  { 3500.0f, 0.50f, 32.0f },
-  { 3500.0f, 0.70f, 28.0f },
-  { 3500.0f, 1.00f, 22.0f },
-  { 4500.0f, 0.10f, 34.0f },
-  { 4500.0f, 0.30f, 32.0f },
-  { 4500.0f, 0.50f, 30.0f },
-  { 4500.0f, 0.70f, 26.0f },
-  { 4500.0f, 1.00f, 20.0f },
-  { 5500.0f, 0.10f, 30.0f },
-  { 5500.0f, 0.30f, 28.0f },
-  { 5500.0f, 0.50f, 26.0f },
-  { 5500.0f, 0.70f, 22.0f },
-  { 5500.0f, 1.00f, 18.0f },
-  { 6500.0f, 0.10f, 28.0f },
-  { 6500.0f, 0.30f, 26.0f },
-  { 6500.0f, 0.50f, 24.0f },
-  { 6500.0f, 0.70f, 20.0f },
-  { 6500.0f, 1.00f, 16.0f },
-};
 
 /* allocator state */
 static lcc_alloc_fn lcc__alloc      = NULL;
@@ -1799,14 +1759,14 @@ void lcc_car_set_esc(lcc_car_t *car, lcc_esc_mode_t mode) {
 }
 
 /* pose and velocity */
-void lcc_car_set_pose(lcc_car_t *car, const float pos_world[2], float yaw_rad) {
+void lcc_car_set_pos(lcc_car_t *car, const float pos_world[2], float yaw_rad) {
   if(!car || !pos_world) return;
   car->car_state.pos_world[0] = pos_world[0];
   car->car_state.pos_world[1] = pos_world[1];
   car->car_state.yaw_rad      = yaw_rad;
 }
 
-void lcc_car_get_pose(const lcc_car_t *car, float pos_world_out[2], float *yaw_rad_out) {
+void lcc_car_get_pos(const lcc_car_t *car, float pos_world_out[2], float *yaw_rad_out) {
   if(!car) return;
   if(pos_world_out) {
     pos_world_out[0] = car->car_state.pos_world[0];
