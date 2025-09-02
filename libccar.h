@@ -114,15 +114,6 @@ typedef enum lcc_diff_type_e {
   LCC_DIFF_ACTIVE     = 4
 } lcc_diff_type_t;
 
-/* suspension type */
-typedef enum lcc_suspension_type_e {
-  LCC_SUS_DWISHBONE    = 0,
-  LCC_SUS_MACPHERSON   = 1,
-  LCC_SUS_TRAILING_ARM = 2,
-  LCC_SUS_SOLID_AXLE   = 3,
-  LCC_SUS_MULTI_LINK   = 4
-} lcc_suspension_type_t;
-
 /* steering assist */
 typedef enum lcc_steer_assist_e { LCC_STEER_ASSIST_NONE = 0, LCC_STEER_ASSIST_HYDRAULIC = 1, LCC_STEER_ASSIST_ELECTRIC = 2 } lcc_steer_assist_t;
 
@@ -207,6 +198,7 @@ typedef struct lcc_engine_desc_s {
   lcc_curve1d_t friction_torque_nm_vs_rpm;
   lcc_curve1d_t throttle_map;
   lcc_map2d_t   boost_pressure_kpa_vs_rpm_throttle;
+  
   float         wastegate_pressure_kpa;
 
   /* TODO: maybe implement the spar cur instead of fuel cut */
@@ -308,15 +300,6 @@ typedef struct lcc_brake_desc_s {
   float cooling_area_m2;
 } lcc_brake_desc_t;
 
-typedef struct lcc_suspension_desc_s {
-  lcc_suspension_type_t type;
-  float                 spring_rate_n_per_m;
-  float                 damper_c_compression_n_per_mps;
-  float                 damper_c_rebound_n_per_mps;
-  float                 travel_m;
-  float                 motion_ratio;
-} lcc_suspension_desc_t;
-
 typedef struct lcc_arb_desc_s {
   float front_rate_n_per_rad;
   float rear_rate_n_per_rad;
@@ -348,7 +331,6 @@ typedef struct lcc_car_desc_s {
   lcc_wheel_desc_t      wheels[LCC_MAX_WHEELS];     /* FL;FR;RL;RR */
   lcc_tire_desc_t       tires[LCC_MAX_WHEELS];      /* FL;FR;RL;RR */
   lcc_brake_desc_t      brakes[LCC_MAX_WHEELS];     /* FL;FR;RL;RR */
-  lcc_suspension_desc_t suspension[LCC_MAX_WHEELS]; /* FL;FR;RL;RR */
   lcc_arb_desc_t        arbs;
   lcc_steering_desc_t   steering;
 
@@ -474,7 +456,6 @@ LCC_API void lcc_aero_desc_init_defaults(lcc_aero_desc_t *desc);
 LCC_API void lcc_wheel_desc_init_defaults(lcc_wheel_desc_t *desc);
 LCC_API void lcc_tire_desc_init_defaults(lcc_tire_desc_t *desc);
 LCC_API void lcc_brake_desc_init_defaults(lcc_brake_desc_t *desc);
-LCC_API void lcc_suspension_desc_init_defaults(lcc_suspension_desc_t *desc);
 LCC_API void lcc_arb_desc_init_defaults(lcc_arb_desc_t *desc);
 LCC_API void lcc_steering_desc_init_defaults(lcc_steering_desc_t *desc);
 LCC_API void lcc_environment_init_defaults(lcc_environment_t *env);
@@ -495,7 +476,6 @@ LCC_API lcc_result_t lcc_car_set_gear_ratios(lcc_car_t *car, const float *gear_r
 LCC_API lcc_result_t lcc_car_set_diff_params(lcc_car_t *car, lcc_diff_type_t front, lcc_diff_type_t rear, float preload_nm, float bias_ratio);
 LCC_API lcc_result_t lcc_car_set_tire_params(lcc_car_t *car, int wheel_index, const lcc_tire_desc_t *tire);
 LCC_API lcc_result_t lcc_car_set_brake_params(lcc_car_t *car, int wheel_index, const lcc_brake_desc_t *brake);
-LCC_API lcc_result_t lcc_car_set_suspension_params(lcc_car_t *car, int wheel_index, const lcc_suspension_desc_t *sus);
 LCC_API lcc_result_t lcc_car_set_arb_params(lcc_car_t *car, const lcc_arb_desc_t *arb);
 LCC_API lcc_result_t lcc_car_set_steering_params(lcc_car_t *car, const lcc_steering_desc_t *steer);
 
@@ -547,19 +527,6 @@ LCC_API int  lcc_car_get_wheel_local_positions(const lcc_car_t *car, float out_p
 
 /* event subscription */
 LCC_API void lcc_car_set_event_callback(lcc_car_t *car, lcc_event_cb callback, void *user);
-
-/* deterministic controls recording/playback */
-typedef struct lcc_control_frame_s {
-  double         time_s;
-  lcc_controls_t controls;
-} lcc_control_frame_t;
-
-LCC_API lcc_result_t lcc_car_playback_controls(lcc_car_t *car, const lcc_control_frame_t *frames, int frame_count);
-
-/* debug helpers */
-LCC_API int lcc_format_engine_summary(const lcc_engine_state_t *es, char *out_str, int maxlen);
-LCC_API int lcc_format_transmission_summary(const lcc_transmission_state_t *ts, char *out_str, int maxlen);
-LCC_API int lcc_format_wheel_summary(const lcc_wheel_state_t *ws, char *out_str, int maxlen);
 
 /* unit helpers */
 LCC_API float lcc_deg_to_rad(float deg);
@@ -1032,17 +999,6 @@ void lcc_brake_desc_init_defaults(lcc_brake_desc_t *desc) {
   desc->cooling_area_m2 = 0.05f;
 }
 
-void lcc_suspension_desc_init_defaults(lcc_suspension_desc_t *desc) {
-  if(!desc) return;
-  memset(desc, 0, sizeof(*desc));
-  desc->type                           = LCC_SUS_MACPHERSON;
-  desc->spring_rate_n_per_m            = 30000.0f;
-  desc->damper_c_compression_n_per_mps = 2500.0f;
-  desc->damper_c_rebound_n_per_mps     = 3000.0f;
-  desc->travel_m                       = 0.20f;
-  desc->motion_ratio                   = 1.0f;
-}
-
 void lcc_arb_desc_init_defaults(lcc_arb_desc_t *desc) {
   if(!desc) return;
   memset(desc, 0, sizeof(*desc));
@@ -1118,7 +1074,6 @@ void lcc_car_desc_init_defaults(lcc_car_desc_t *desc) {
   for(int i = 0; i < desc->wheel_count; ++i) {
     lcc_tire_desc_init_defaults(&desc->tires[i]);
     lcc_brake_desc_init_defaults(&desc->brakes[i]);
-    lcc_suspension_desc_init_defaults(&desc->suspension[i]);
   }
 
   lcc_arb_desc_init_defaults(&desc->arbs);
@@ -1740,13 +1695,6 @@ lcc_result_t lcc_car_set_brake_params(lcc_car_t *car, int wheel_index, const lcc
   return LCC_OK;
 }
 
-lcc_result_t lcc_car_set_suspension_params(lcc_car_t *car, int wheel_index, const lcc_suspension_desc_t *sus) {
-  if(!car || !sus) return LCC_ERR_INVALID_ARG;
-  if(wheel_index < 0 || wheel_index >= car->wheel_count) return LCC_ERR_BOUNDS;
-  car->desc.suspension[wheel_index] = *sus;
-  return LCC_OK;
-}
-
 lcc_result_t lcc_car_set_arb_params(lcc_car_t *car, const lcc_arb_desc_t *arb) {
   if(!car || !arb) return LCC_ERR_INVALID_ARG;
   car->desc.arbs = *arb;
@@ -2357,12 +2305,12 @@ lcc_result_t lcc_car_step(lcc_car_t *car, float dt_s) {
   float m   = fmaxf(1.0f, car->car_state.mass_kg);
   float Izz = fmaxf(1.0f, car->desc.chassis.inertia_zz);
 
-  /* 1) yaw dynamics from Mz (unchanged) */
+  /* yaw dynamics from Mz */
   float yaw_acc = Mz / Izz;
   car->car_state.yaw_rate_radps += yaw_acc * dt_s;
   car->car_state.yaw_rad += car->car_state.yaw_rate_radps * dt_s;
 
-  /* 2) linear dynamics in world frame */
+  /* linear dynamics in world frame */
   float F_world[2];
   lcc__v2_rot(F_world, F_body_sum, car->car_state.yaw_rad); /* body -> world */
 
@@ -2375,7 +2323,7 @@ lcc_result_t lcc_car_step(lcc_car_t *car, float dt_s) {
   car->car_state.pos_world[0] += car->car_state.vel_world[0] * dt_s;
   car->car_state.pos_world[1] += car->car_state.vel_world[1] * dt_s;
 
-  /* 3) derive body-frame kinematics for tires/susp/loads */
+  /* derive body-frame kinematics for tires/sloads */
   lcc__v2_rot(car->car_state.vel_body, car->car_state.vel_world, -car->car_state.yaw_rad);
   lcc__v2_rot(car->car_state.acc_body, car->car_state.acc_world, -car->car_state.yaw_rad);
 
@@ -2555,62 +2503,6 @@ int lcc_car_get_wheel_local_positions(const lcc_car_t *car, float out_positions[
     out_positions[i][1] = car->desc.wheels[i].position_local[1];
   }
   return n;
-}
-
-/* playback */
-lcc_result_t lcc_car_playback_controls(lcc_car_t *car, const lcc_control_frame_t *frames, int frame_count) {
-  if(!car || !frames || frame_count <= 0) return LCC_ERR_INVALID_ARG;
-
-  for(int i = 1; i < frame_count; ++i) {
-    double t0 = frames[i - 1].time_s;
-    double t1 = frames[i].time_s;
-    double dt = t1 - t0;
-    if(!(dt > 0.0)) return LCC_ERR_INVALID_ARG;
-
-    /* piecewise-constant hold of previous frame's controls */
-    lcc_car_set_controls(car, &frames[i - 1].controls);
-
-    /* Step in sub-steps no larger than 0.05s, and within engine limits (<=0.1s) */
-    int steps = (int)ceil(dt / 0.05);
-    if(steps < 1) steps = 1;
-    float dt_step = (float)(dt / (double)steps);
-    if(dt_step > 0.1f) {
-      steps   = (int)ceil(dt / 0.1);
-      dt_step = (float)(dt / (double)steps);
-    }
-
-    for(int s = 0; s < steps; ++s) {
-      lcc_result_t r = lcc_car_step(car, dt_step);
-      if(r != LCC_OK) return r;
-    }
-  }
-
-  /* Set final controls to the last frame */
-  lcc_car_set_controls(car, &frames[frame_count - 1].controls);
-  return LCC_OK;
-}
-
-/* debug formatters */
-int lcc_format_engine_summary(const lcc_engine_state_t *es, char *out_str, int maxlen) {
-  if(!out_str || maxlen <= 0) return 0;
-  if(!es) return snprintf(out_str, (size_t)maxlen, "engine: <null>");
-  return snprintf(out_str, (size_t)maxlen, "engine: rpm=%.0f", es->rpm);
-}
-
-int lcc_format_transmission_summary(const lcc_transmission_state_t *ts, char *out_str, int maxlen) {
-  if(!out_str || maxlen <= 0) return 0;
-  if(!ts) return snprintf(out_str, (size_t)maxlen, "trans: <null>");
-  return snprintf(out_str, (size_t)maxlen, "trans: gear=%d clutch=%.0f%% shifting=%s", ts->gear_index, 100.0f * ts->clutch_engagement,
-    ts->shifting ? "yes" : "no");
-}
-
-int lcc_format_wheel_summary(const lcc_wheel_state_t *ws, char *out_str, int maxlen) {
-  if(!out_str || maxlen <= 0) return 0;
-  if(!ws) return snprintf(out_str, (size_t)maxlen, "wheel: <null>");
-  return snprintf(out_str, (size_t)maxlen,
-    "wheel: omega=%.2frad/s slip=%.2f%% alpha=%.2fdeg Fx=%.2fN Fy=%.2fN Fz=%.2fN Tdrv=%.2fNm Tbr=%.2fNm T=%.2fC wear=%.2f", ws->omega_radps,
-    100.0f * ws->slip_ratio, lcc__rad2deg(ws->slip_angle_rad), ws->tire_force_long_n, ws->tire_force_lat_n, ws->normal_force_n, ws->drive_torque_nm,
-    ws->brake_torque_nm, ws->tire_temp_c, ws->tire_wear);
 }
 
 #endif

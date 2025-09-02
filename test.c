@@ -171,47 +171,13 @@ int lcc_run_self_test(void)
     c.brake = 0.0f;
     step_seconds(car, 1.0, &c); print_line(car, "phaseE");
 
-    /* 7) Damage application tests */
-    lcc_car_apply_damage_factor(car, "engine", 0.8f);
-    lcc_car_apply_damage_factor(car, "brake front left", 0.6f);
-    lcc_damage_state_t dmg; lcc_car_get_damage_state(car, &dmg);
-    printf("damage: engine=%.2f brFL=%.2f\n", dmg.engine_health, dmg.brake_health[0]);
-
-    /* 8) Playback controls: small script */
-    lcc_control_frame_t script[] = {
-        { 0.0,  { .throttle=0.0f, .brake=0.0f, .clutch=0.0f, .steer=0.0f } },
-        { 0.5,  { .throttle=0.4f, .brake=0.0f, .clutch=0.0f, .steer=0.0f } },
-        { 1.0,  { .throttle=0.8f, .brake=0.0f, .clutch=0.0f, .steer=0.2f } },
-        { 1.5,  { .throttle=1.0f, .brake=0.0f, .clutch=0.0f, .steer=-0.2f } },
-        { 2.0,  { .throttle=0.0f, .brake=1.0f, .clutch=0.0f, .steer=0.0f } },
-        { 2.5,  { .throttle=0.0f, .brake=0.0f, .clutch=0.0f, .steer=0.0f } }
-    };
-    if (lcc_car_playback_controls(car, script, (int)(sizeof(script)/sizeof(script[0]))) != LCC_OK) {
-        fprintf(stderr, "playback failed\n");
-    } else {
-        print_line(car, "post-playback");
-    }
-
-    /* 9) Debug formatters */
-    {
-        lcc_engine_state_t es; lcc_transmission_state_t ts; lcc_wheel_state_t ws;
-        char buf[256];
-        lcc_car_get_engine_state(car, &es);
-        lcc_car_get_transmission_state(car, &ts);
-        lcc_car_get_wheel_state(car, 0, &ws);
-
-        lcc_format_engine_summary(&es, buf, sizeof(buf)); printf("%s\n", buf);
-        lcc_format_transmission_summary(&ts, buf, sizeof(buf)); printf("%s\n", buf);
-        lcc_format_wheel_summary(&ws, buf, sizeof(buf)); printf("%s\n", buf);
-    }
-
-    /* 10) Unit helpers sanity */
+    /* 7) Unit helpers sanity */
     float d = 90.0f;
     float r = lcc_deg_to_rad(d);
     float d2 = lcc_rad_to_deg(r);
     printf("units: %.2f deg -> %.3f rad -> %.2f deg\n", d, r, d2);
 
-    /* 11) Wrap up */
+    /* 8) Wrap up */
     printf("events captured: %d\n", ev.count);
     lcc_car_destroy(car);
     return 0;
