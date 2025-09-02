@@ -85,10 +85,9 @@ struct WheelSample {
     t_drive: f32, // [Nm]
     t_brake: f32, // [Nm]
     // tire/env
-    pressure_kpa: f32, // [kPa]
-    temp: f32,         // [C]
-    est_mu: f32,       // estimated mu (see logic below)
-    fcap: f32,         // mu*Fz [N]
+    temp: f32,   // [C]
+    est_mu: f32, // estimated mu (see logic below)
+    fcap: f32,   // mu*Fz [N]
 }
 #[derive(Serialize, Clone)]
 struct TelemetrySample {
@@ -106,9 +105,6 @@ struct TelemetrySample {
 
     // engine / trans / inputs
     engine_rpm: f32,
-    engine_torque_nm: f32,
-    engine_thr_eff: f32,
-    manifold_kpa: f32,
 
     gear: i32,
     throttle: f32,  // command (your input/control)
@@ -241,9 +237,6 @@ impl TelemetryRec {
                 s.yaw,
                 s.yaw_rate,
                 s.engine_rpm,
-                s.engine_torque_nm,
-                s.engine_thr_eff,
-                s.manifold_kpa,
                 s.gear as f32,
                 s.throttle,
                 s.brake,
@@ -262,7 +255,6 @@ impl TelemetryRec {
                 s.wheels[0].load,
                 s.wheels[0].t_drive,
                 s.wheels[0].t_brake,
-                s.wheels[0].pressure_kpa,
                 s.wheels[0].temp,
                 s.wheels[0].est_mu,
                 s.wheels[0].fcap,
@@ -274,7 +266,6 @@ impl TelemetryRec {
                 s.wheels[1].load,
                 s.wheels[1].t_drive,
                 s.wheels[1].t_brake,
-                s.wheels[1].pressure_kpa,
                 s.wheels[1].temp,
                 s.wheels[1].est_mu,
                 s.wheels[1].fcap,
@@ -286,7 +277,6 @@ impl TelemetryRec {
                 s.wheels[2].load,
                 s.wheels[2].t_drive,
                 s.wheels[2].t_brake,
-                s.wheels[2].pressure_kpa,
                 s.wheels[2].temp,
                 s.wheels[2].est_mu,
                 s.wheels[2].fcap,
@@ -298,7 +288,6 @@ impl TelemetryRec {
                 s.wheels[3].load,
                 s.wheels[3].t_drive,
                 s.wheels[3].t_brake,
-                s.wheels[3].pressure_kpa,
                 s.wheels[3].temp,
                 s.wheels[3].est_mu,
                 s.wheels[3].fcap,
@@ -594,7 +583,6 @@ impl App {
             ViewPreset::Economy => {
                 d.chassis.mass_kg = 1100.0;
                 d.driveline.layout = LCC_LAYOUT_FWD;
-                d.engine.displacement_l = 1.4;
                 d.engine.redline_rpm = 6200.0;
                 d.tires[0].mu_nominal = 0.95;
                 d.tires[1].mu_nominal = 0.95;
@@ -604,7 +592,6 @@ impl App {
             ViewPreset::Midsize => {
                 d.chassis.mass_kg = 1400.0;
                 d.driveline.layout = LCC_LAYOUT_FWD;
-                d.engine.displacement_l = 2.0;
                 d.engine.redline_rpm = 6500.0;
                 for i in 0..4 {
                     d.tires[i].mu_nominal = 1.05;
@@ -613,7 +600,6 @@ impl App {
             ViewPreset::Sports => {
                 d.chassis.mass_kg = 1350.0;
                 d.driveline.layout = LCC_LAYOUT_RWD;
-                d.engine.displacement_l = 3.0;
                 d.engine.redline_rpm = 7000.0;
                 for i in 0..4 {
                     d.tires[i].mu_nominal = 1.15;
@@ -625,7 +611,6 @@ impl App {
             ViewPreset::Supercar => {
                 d.chassis.mass_kg = 1450.0;
                 d.driveline.layout = LCC_LAYOUT_AWD;
-                d.engine.displacement_l = 4.0;
                 d.engine.redline_rpm = 8000.0;
                 for i in 0..4 {
                     d.tires[i].mu_nominal = 1.35;
@@ -639,7 +624,6 @@ impl App {
             ViewPreset::Hypercar => {
                 d.chassis.mass_kg = 1250.0;
                 d.driveline.layout = LCC_LAYOUT_AWD;
-                d.engine.displacement_l = 5.2;
                 d.engine.redline_rpm = 8500.0;
                 for i in 0..4 {
                     d.tires[i].mu_nominal = 1.5;
@@ -773,7 +757,7 @@ impl App {
     fn world_pos(&self) -> Vec2 {
         unsafe {
             let mut cs: ffi::lcc_car_state_t = mem::zeroed();
-            ffi::lcc_car_get_state(self.car, &mut cs);
+            ffi::lcc_car_get_car_state(self.car, &mut cs);
             Vec2::new(cs.pos_world[0], cs.pos_world[1])
         }
     }
@@ -840,30 +824,38 @@ impl App {
     }
     unsafe fn fixed_update(&mut self, dt: f32) {
         let _ = ffi::lcc_car_step(self.car, dt);
-        let mut tele: ffi::lcc_telemetry_t = mem::zeroed();
-        ffi::lcc_car_get_telemetry(self.car, &mut tele);
+        let mut cs: ffi::lcc_car_state_t = mem::zeroed();
+        let mut es: ffi::lcc_engine_state_t = mem::zeroed();
+        let mut ts: ffi::lcc_transmission_state_t = mem::zeroed();
+        ffi::lcc_car_get_car_state(self.car, &mut cs);
+        ffi::lcc_car_get_engine_state(self.car, &mut es);
+        ffi::lcc_car_get_transmission_state(self.car, &mut ts);
+        let mut ws: [ffi::lcc_wheel_state_t; 4] =
+            [mem::zeroed(), mem::zeroed(), mem::zeroed(), mem::zeroed()];
+        for i in 0..4 {
+            ffi::lcc_car_get_wheel_state(self.car, i as i32, &mut ws[i]);
+        }
 
-        // plots
-        let speed_kmh = tele.car.speed_mps * 3.6;
-        let rpm = tele.engine.rpm;
+        let speed_kmh = cs.speed_mps * 3.6;
+        let rpm = es.rpm;
         let omega = [
-            tele.wheels[0].omega_radps,
-            tele.wheels[1].omega_radps,
-            tele.wheels[2].omega_radps,
-            tele.wheels[3].omega_radps,
+            ws[0].omega_radps,
+            ws[1].omega_radps,
+            ws[2].omega_radps,
+            ws[3].omega_radps,
         ];
         let slip = [
-            tele.wheels[0].slip_ratio,
-            tele.wheels[1].slip_ratio,
-            tele.wheels[2].slip_ratio,
-            tele.wheels[3].slip_ratio,
+            ws[0].slip_ratio,
+            ws[1].slip_ratio,
+            ws[2].slip_ratio,
+            ws[3].slip_ratio,
         ];
         self.plots
-            .push(rpm, speed_kmh, omega, slip, tele.car.yaw_rate_radps);
+            .push(rpm, speed_kmh, omega, slip, cs.yaw_rate_radps);
 
         // helper: estimate mu and mu*Fz as in lib
-        let est_mu_fc = |i: usize, w: &ffi::lcc_wheel_state_t| -> (f32, f32) {
-            let fz = w.normal_force_n.max(0.0);
+        let est_mu_fc = |i: usize, wst: &ffi::lcc_wheel_state_t| -> (f32, f32) {
+            let fz = wst.normal_force_n.max(0.0);
             let mut mu = self.desc.tires[i].mu_nominal + self.desc.tires[i].load_sensitivity * fz;
             mu = mu.clamp(0.2, 3.0);
             mu *= self.env.global_friction_scale.clamp(0.1, 2.0);
@@ -871,44 +863,53 @@ impl App {
         };
 
         let wheel_sample = |i: usize| -> WheelSample {
-            let w = tele.wheels[i];
-            let (mu, fcap) = est_mu_fc(i, &w);
+            let wst = ws[i];
+            let (mu, fcap) = est_mu_fc(i, &wst);
             WheelSample {
-                slip_ratio: w.slip_ratio,
-                slip_angle: w.slip_angle_rad,
-                omega: w.omega_radps,
-                f_long: w.tire_force_long_n,
-                f_lat: w.tire_force_lat_n,
-                load: w.normal_force_n,
-                t_drive: w.drive_torque_nm,
-                t_brake: w.brake_torque_nm,
-                pressure_kpa: w.pressure_kpa,
-                temp: w.tire_temp_c,
+                slip_ratio: wst.slip_ratio,
+                slip_angle: wst.slip_angle_rad,
+                omega: wst.omega_radps,
+                f_long: wst.tire_force_long_n,
+                f_lat: wst.tire_force_lat_n,
+                load: wst.normal_force_n,
+                t_drive: wst.drive_torque_nm,
+                t_brake: wst.brake_torque_nm,
+                temp: wst.tire_temp_c,
                 est_mu: mu,
                 fcap,
             }
         };
+        let glue = cs.speed_mps < 0.25;
 
-        let glue = tele.car.speed_mps < 0.25;
+        // compute wheel world positions from pose
+        let pos = Vec2::new(cs.pos_world[0], cs.pos_world[1]);
+        let rot = Mat2::from_angle(cs.yaw_rad);
+        let wheel_world: [Vec2; 4] = (0..4)
+            .map(|i| {
+                let local = Vec2::new(
+                    self.desc.wheels[i].position_local[0],
+                    self.desc.wheels[i].position_local[1],
+                );
+                pos + rot * local
+            })
+            .collect::<Vec<Vec2>>()
+            .try_into()
+            .unwrap_or([Vec2::ZERO; 4]);
 
         let sample = TelemetrySample {
-            t: tele.car.time_s as f32,
-            dt: tele.car.dt_s,
-            pos_x: tele.car.pos_world[0],
-            pos_y: tele.car.pos_world[1],
-            vel_x: tele.car.vel_world[0],
-            vel_y: tele.car.vel_world[1],
-            speed_mps: tele.car.speed_mps,
+            t: cs.time_s as f32,
+            dt,
+            pos_x: cs.pos_world[0],
+            pos_y: cs.pos_world[1],
+            vel_x: cs.vel_world[0],
+            vel_y: cs.vel_world[1],
+            speed_mps: cs.speed_mps,
             speed_kmh,
-            yaw: tele.car.yaw_rad,
-            yaw_rate: tele.car.yaw_rate_radps,
+            yaw: cs.yaw_rad,
+            yaw_rate: cs.yaw_rate_radps,
 
-            engine_rpm: tele.engine.rpm,
-            engine_torque_nm: tele.engine.torque_nm,
-            engine_thr_eff: tele.engine.throttle_effective,
-            manifold_kpa: tele.engine.manifold_pressure_kpa,
-
-            gear: tele.transmission.gear_index,
+            engine_rpm: es.rpm,
+            gear: ts.gear_index,
             throttle: self.controls.throttle,
             brake: self.controls.brake,
             steering: self.controls.steer,
@@ -930,7 +931,7 @@ impl App {
         self.telemetry_rec.push(sample);
 
         // Path trace
-        let pos = Vec2::new(tele.car.pos_world[0], tele.car.pos_world[1]);
+        let pos = Vec2::new(cs.pos_world[0], cs.pos_world[1]);
         if self
             .path_trace
             .last()
@@ -944,19 +945,14 @@ impl App {
         }
 
         // Skid marks (wheel patch positions are given)
-        let mut wheel_world = [Vec2::ZERO; 4];
-        for i in 0..4 {
-            wheel_world[i] = Vec2::new(
-                tele.wheels[i].patch_world_pos[0],
-                tele.wheels[i].patch_world_pos[1],
-            );
-        }
+        let wheel_world = wheel_world;
+
         if !self.have_last_wheel_world {
             self.last_wheel_world = wheel_world;
             self.have_last_wheel_world = true;
         } else {
             for i in 0..4 {
-                let w = tele.wheels[i];
+                let w = ws[i];
                 let sr = w.slip_ratio.abs();
                 let sa = w.slip_angle_rad.abs();
                 let long = (sr / self.slip_ratio_threshold).max(0.0);
@@ -1049,7 +1045,7 @@ impl App {
         unsafe {
             // draw car body
             let mut cs: ffi::lcc_car_state_t = mem::zeroed();
-            ffi::lcc_car_get_state(self.car, &mut cs);
+            ffi::lcc_car_get_car_state(self.car, &mut cs);
 
             let pos = Vec2::new(cs.pos_world[0], cs.pos_world[1]);
             let p0 = to_screen_point(pos, self.camera_pos, self.zoom, center);
@@ -1091,15 +1087,17 @@ impl App {
                 Stroke::new(2.0, Color32::from_rgb(180, 200, 220)),
             ));
 
-            // wheels
-            let mut tele: ffi::lcc_telemetry_t = mem::zeroed();
-            ffi::lcc_car_get_telemetry(self.car, &mut tele);
-
+            // wheels (compute world positions from car pose + wheel local)
             for i in 0..4usize {
-                let wheel_world = Vec2::new(
-                    tele.wheels[i].patch_world_pos[0],
-                    tele.wheels[i].patch_world_pos[1],
+                let local = Vec2::new(
+                    self.desc.wheels[i].position_local[0],
+                    self.desc.wheels[i].position_local[1],
                 );
+                let wheel_world = pos + rot * local;
+                // fetch wheel state
+                let mut ws: ffi::lcc_wheel_state_t = mem::zeroed();
+                ffi::lcc_car_get_wheel_state(self.car, i as i32, &mut ws);
+
                 // approximate steer angle for visuals: body yaw + input steer fraction
                 let steer_max = self.desc.steering.max_steer_deg * (PI as f32 / 180.0);
                 let steer_angle = if self.desc.wheels[i].steerable != 0 {
@@ -1115,7 +1113,7 @@ impl App {
                     angle,
                     self.desc.wheels[i].radius_m * 2.0,
                     self.desc.wheels[i].width_m,
-                    &tele.wheels[i],
+                    &ws,
                 );
             }
         }
@@ -1392,12 +1390,16 @@ impl App {
 
         ui.separator();
         unsafe {
-            let mut tele: ffi::lcc_telemetry_t = mem::zeroed();
-            ffi::lcc_car_get_telemetry(self.car, &mut tele);
-            ui.label(format!("Speed: {:6.1} km/h", tele.car.speed_mps * 3.6));
-            ui.label(format!("Engine RPM: {:6.0}", tele.engine.rpm));
-            ui.label(format!("Gear: {}", tele.transmission.gear_index));
-            ui.label(format!("Yaw: {:5.2} rad", tele.car.yaw_rad));
+            let mut cs: ffi::lcc_car_state_t = mem::zeroed();
+            let mut es: ffi::lcc_engine_state_t = mem::zeroed();
+            let mut ts: ffi::lcc_transmission_state_t = mem::zeroed();
+            ffi::lcc_car_get_car_state(self.car, &mut cs);
+            ffi::lcc_car_get_engine_state(self.car, &mut es);
+            ffi::lcc_car_get_transmission_state(self.car, &mut ts);
+            ui.label(format!("Speed: {:6.1} km/h", cs.speed_mps * 3.6));
+            ui.label(format!("Engine RPM: {:6.0}", es.rpm));
+            ui.label(format!("Gear: {}", ts.gear_index));
+            ui.label(format!("Yaw: {:5.2} rad", cs.yaw_rad));
         }
 
         ui.separator();
@@ -1428,10 +1430,12 @@ impl App {
 
         ui.separator();
         ui.collapsing("Fuel / Electrics", |ui| unsafe {
-            let mut tele: ffi::lcc_telemetry_t = mem::zeroed();
-            ffi::lcc_car_get_telemetry(self.car, &mut tele);
+            let mut fuel: ffi::lcc_fuel_state_t = mem::zeroed();
+            let mut elec: ffi::lcc_electrics_state_t = mem::zeroed();
+            ffi::lcc_car_get_fuel_state(self.car, &mut fuel);
+            ffi::lcc_car_get_electrics_state(self.car, &mut elec);
             let cap = self.desc.fuel.tank_capacity_l;
-            let lvl = tele.fuel.fuel_l;
+            let lvl = fuel.fuel_l;
             ui.label(format!("Fuel: {:5.1} / {:5.1} L", lvl, cap));
             ui.horizontal(|ui| {
                 if ui.button("Refill full").clicked() {
@@ -1441,11 +1445,7 @@ impl App {
                     let _ = ffi::lcc_car_refuel(self.car, 5.0);
                 }
             });
-            ui.label(format!(
-                "Battery: {:4.2} V  |  SOC: {:3.0}%",
-                tele.electrics.battery_voltage_v,
-                tele.electrics.battery_soc * 100.0
-            ));
+            ui.label(format!("Battery SOC: {:3.0}%", elec.battery_soc * 100.0));
         });
 
         ui.separator();
@@ -1600,10 +1600,12 @@ impl App {
         let origin = Pos2::new(r.left() + 130.0, r.top() + 130.0);
 
         unsafe {
-            let mut tele: ffi::lcc_telemetry_t = mem::zeroed();
-            ffi::lcc_car_get_telemetry(self.car, &mut tele);
+            let mut es: ffi::lcc_engine_state_t = mem::zeroed();
+            let mut ts: ffi::lcc_transmission_state_t = mem::zeroed();
+            ffi::lcc_car_get_engine_state(self.car, &mut es);
+            ffi::lcc_car_get_transmission_state(self.car, &mut ts);
 
-            let rpm = tele.engine.rpm;
+            let rpm = es.rpm;
             let redline = self.desc.engine.redline_rpm.max(1.0);
             draw_rpm_gauge(&painter, origin, rpm, redline);
 
@@ -1643,8 +1645,8 @@ impl App {
                 (self.controls.steer + 1.0) / 2.0,
                 Color32::YELLOW,
             );
+            let gear = ts.gear_index;
 
-            let gear = tele.transmission.gear_index;
             let gtxt = if gear == 0 {
                 "R".to_string()
             } else if gear == 1 {
@@ -1662,7 +1664,10 @@ impl App {
 
             let base2 = Pos2::new(origin.x + 160.0, origin.y + 50.0);
             let cap = self.desc.fuel.tank_capacity_l;
-            let lvl = tele.fuel.fuel_l;
+
+            let mut fuel_state: ffi::lcc_fuel_state_t = mem::zeroed();
+            ffi::lcc_car_get_fuel_state(self.car, &mut fuel_state);
+            let lvl = fuel_state.fuel_l;
             draw_bar(
                 &painter,
                 Pos2::new(base2.x, base2.y + 24.0),
@@ -1674,12 +1679,13 @@ impl App {
             let base = Pos2::new(origin.x + 320.0, origin.y - 80.0);
             let labels = ["FL", "FR", "RL", "RR"];
             for i in 0..4 {
-                let w = &tele.wheels[i];
+                let mut w: ffi::lcc_wheel_state_t = mem::zeroed();
+                ffi::lcc_car_get_wheel_state(self.car, i as i32, &mut w);
                 draw_wheel_info(
                     &painter,
                     Pos2::new(base.x, base.y + i as f32 * 30.0),
                     labels[i],
-                    w,
+                    &w,
                 );
             }
         }
@@ -1954,13 +1960,8 @@ unsafe fn draw_wheel_info(
     w: &ffi::lcc_wheel_state_t,
 ) {
     let txt = format!(
-        "{label}  SR {:5.2}  SA {:5.2}  ω {:8.2}  Fz {:5.0}N  T {:4.1}°C  P {:4.0}kPa",
-        w.slip_ratio,
-        w.slip_angle_rad,
-        w.omega_radps,
-        w.normal_force_n,
-        w.tire_temp_c,
-        w.pressure_kpa
+        "{label}  SR {:5.2}  SA {:5.2}  ω {:8.2}  Fz {:5.0}N  T {:4.1}°C  wear {:4.2}",
+        w.slip_ratio, w.slip_angle_rad, w.omega_radps, w.normal_force_n, w.tire_temp_c, w.tire_wear
     );
     painter.text(
         pos,
