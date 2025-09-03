@@ -32,6 +32,49 @@ extern "C" {
 #define LCC_TAU (2.0f * LCC_PI)
 #endif
 
+/* electrics tuning */
+#ifndef LCC_ALT_REG_VOLTAGE_V
+#define LCC_ALT_REG_VOLTAGE_V 14.2f
+#endif
+#ifndef LCC_BATT_OCV_FULL_V
+#define LCC_BATT_OCV_FULL_V 12.70f
+#endif
+#ifndef LCC_BATT_OCV_EMPTY_V
+#define LCC_BATT_OCV_EMPTY_V 11.80f
+#endif
+#ifndef LCC_BATT_R_INTERNAL_OHM
+#define LCC_BATT_R_INTERNAL_OHM 0.018f
+#endif
+#ifndef LCC_BATT_R_SOC_GAIN
+#define LCC_BATT_R_SOC_GAIN 0.8f /* R rises as SOC drops */
+#endif
+#ifndef LCC_BATT_R_TEMP_GAIN
+#define LCC_BATT_R_TEMP_GAIN 1.5f /* R rises when cold */
+#endif
+#ifndef LCC_BATT_CAP_TEMP_COEF_PER_K
+#define LCC_BATT_CAP_TEMP_COEF_PER_K -0.0045f /* capacity change per K relative to 25C */
+#endif
+#ifndef LCC_BATT_CHARGE_EFF
+#define LCC_BATT_CHARGE_EFF 0.95f
+#endif
+#ifndef LCC_STARTER_EFF
+#define LCC_STARTER_EFF 0.60f /* mech->elec power ratio for starter draw */
+#endif
+
+/* engine starting/cranking tuning */
+#ifndef LCC_ENGINE_CATCH_RPM_FACTOR
+#define LCC_ENGINE_CATCH_RPM_FACTOR 0.80f /* fraction of idle rpm at which engine "catches" */
+#endif
+#ifndef LCC_ENGINE_CRANK_MIN_TIME_S
+#define LCC_ENGINE_CRANK_MIN_TIME_S 0.25f /* minimum cranking time before a catch is possible */
+#endif
+#ifndef LCC_ENGINE_STARTER_MAX_TORQUE_NM
+#define LCC_ENGINE_STARTER_MAX_TORQUE_NM 120.0f /* clamp for starter torque */
+#endif
+#ifndef LCC_ENGINE_STARTER_MIN_OMEGA_RADPS
+#define LCC_ENGINE_STARTER_MIN_OMEGA_RADPS 10.0f /* prevents infinite torque near 0 rad/s */
+#endif
+
 /* pacejka shape and combined-slip tuning (overridable by defining before include)*/
 #ifndef LCC_PACEJKA_CX
 #define LCC_PACEJKA_CX 1.65f /* longitudinal shape factor */
@@ -205,11 +248,16 @@ typedef struct {
   float capacity_ah;
   float nominal_voltage_v;
   float initial_soc;
+  float internal_resistance_ohm;
+  float ocv_full_v;
+  float ocv_empty_v;
+  float charge_efficiency;
 } lcc_battery_desc_t;
 
 typedef struct {
   float max_current_a;
   float cut_in_rpm;
+  float regulator_voltage_v;
 } lcc_alternator_desc_t;
 
 typedef struct {
@@ -345,6 +393,7 @@ typedef struct {
 
 typedef struct {
   lcc_bool_t running;
+  lcc_bool_t cranking;
   float      rpm;
 } lcc_engine_state_t;
 
@@ -362,6 +411,9 @@ typedef struct {
 typedef struct {
   float      battery_soc;
   lcc_bool_t consumers_headlights;
+  float      bus_voltage_v;  /* solved system voltage */
+  float      alt_current_a;  /* alternator output current (+ to bus) */
+  float      batt_current_a; /* battery current (+ discharging to bus, - charging) */
 } lcc_electrics_state_t;
 
 typedef struct {
@@ -427,6 +479,8 @@ typedef struct {
   float tc_cut; /* 0..1 cut factor applied to engine torque */
   float esc_extra_brake[LCC_MAX_WHEELS];
   float idle_i; /* idle control integrator (internal) */
+
+  float engine_crank_timer_s;
 
   /* tire slip dynamics states for Pacejka */
   float slip_kappa_filt[LCC_MAX_WHEELS];
@@ -547,6 +601,7 @@ LCC_API float lcc_rad_to_deg(float rad);
 #endif
 #endif /* LIBCCAR_H */
 
+#define LCC_IMPLEMENTATION
 #ifdef LCC_IMPLEMENTATION
 
 #include <math.h>
@@ -717,6 +772,35 @@ static float lcc__slip_angle(float Vlong, float Vlat) {
   return atan2f(Vlat, fmaxf(fabsf(Vlong), 0.1f));
 }
 
+/*  electrics helpers */
+static float lcc__batt_ocv(const lcc_battery_desc_t *bd, float soc) {
+  float s = lcc__saturate(soc);
+  /* simple linear OCV model across SOC */
+  return bd->ocv_empty_v + (bd->ocv_full_v - bd->ocv_empty_v) * s;
+}
+
+static float lcc__batt_r_internal(const lcc_battery_desc_t *bd, float soc, float temp_c) {
+  float s       = lcc__saturate(soc);
+  float cold    = lcc__clampf((25.0f - temp_c) / 30.0f, 0.0f, 1.0f); /* 0 at 25C, 1 at -5C */
+  float r_scale = 1.0f + LCC_BATT_R_SOC_GAIN * (1.0f - s) + LCC_BATT_R_TEMP_GAIN * cold;
+  float R       = bd->internal_resistance_ohm * r_scale;
+  return lcc__clampf(R, 0.005f, 0.12f);
+}
+
+static float lcc__batt_cap_temp_scale(float temp_c) {
+  /* crude lead-acid capacity reduction in cold */
+  float dT = 25.0f - temp_c;
+  float sc = 1.0f + LCC_BATT_CAP_TEMP_COEF_PER_K * dT;
+  return lcc__clampf(sc, 0.55f, 1.10f);
+}
+
+static float lcc__alt_current_cap(const lcc_alternator_desc_t *alt, float rpm, lcc_bool_t engine_running) {
+  if(!engine_running) return 0.0f;
+  if(rpm < alt->cut_in_rpm) return 0.0f;
+  float frac = lcc__clampf((rpm - alt->cut_in_rpm) / 2000.0f, 0.0f, 1.0f);
+  return alt->max_current_a * frac;
+}
+
 /*}}}*/
 
 /* ============================== physics implementation ============================== {{{*/
@@ -798,11 +882,19 @@ static void lcc__init_runtime(lcc_car_t *car) {
   float fuel_mass                      = car->fuel_state.fuel_l * car->desc.fuel.fuel_density_kg_per_l;
   car->elec_state.battery_soc          = lcc__saturate(car->desc.battery.initial_soc);
   car->elec_state.consumers_headlights = 0;
+  /* initialize a reasonable bus voltage from battery OCV */
+  {
+    float soc                     = car->elec_state.battery_soc;
+    float ocv                     = car->desc.battery.ocv_empty_v + (car->desc.battery.ocv_full_v - car->desc.battery.ocv_empty_v) * lcc__saturate(soc);
+    car->elec_state.bus_voltage_v = ocv;
+  }
 
   car->car_state.mass_kg = car->desc.chassis.mass_kg + fuel_mass;
 
-  car->engine_state.running = 0;
-  car->engine_state.rpm     = 0.0f; /* call lcc_car_engine_start to idle */
+  car->engine_state.running  = 0;
+  car->engine_state.cranking = 0;
+  car->engine_crank_timer_s  = 0.0f;
+  car->engine_state.rpm      = 0.0f;
 
   car->cool_state.coolant_temp_c = car->env.ambient_temp_c;
 
@@ -1383,15 +1475,27 @@ static lcc_result_t lcc__car_step(lcc_car_t *car, float dt_s) {
   float shaft_out_rpm = lcc__radps_to_rpm(avg_omega) * fmaxf(0.1f, final_drive);
 
   /* engine model */
-  float tq_engine = 0.0f;
-  if(!car->engine_state.running) {
-    if(car->controls.ignition_switch && car->controls.starter && car->elec_state.battery_soc > 0.05f && car->fuel_state.fuel_l > 0.01f) car->engine_state.rpm = lcc__lp(car->engine_state.rpm, car->desc.engine.idle_rpm, 4.0f, dt_s);
-  } else {
+  const lcc_engine_desc_t *ed             = &car->desc.engine;
+  float                    tq_engine_comb = 0.0f; /* combustion torque (already net of internal friction in map) */
+  float                    T_starter      = 0.0f; /* starter torque */
+  float                    T_fric_drag    = 0.0f; /* passive friction when not combusting */
+
+  /* cranking request: either from API (engine_state.cranking) or driver controls */
+  int has_fuel   = (car->fuel_state.fuel_l > 1e-3f);
+  int want_crank = (!car->engine_state.running) && (car->engine_state.cranking || (car->controls.ignition_switch && car->controls.starter));
+  if(want_crank && has_fuel && car->elec_state.battery_soc > 0.05f) car->engine_state.cranking = 1, car->engine_crank_timer_s += dt_s;
+  else if(!car->controls.starter) {
+    car->engine_state.cranking = 0;
+    car->engine_crank_timer_s  = 0.0f;
+  }
+
+  /* running -> produce combustion torque with idle control & TC cut */
+  if(car->engine_state.running && car->controls.ignition_switch) {
     float throttle_eff = lcc__saturate(car->controls.throttle);
 
     /* idle control */
     if(car->desc.ecu.idle_control && throttle_eff < 0.05f) {
-      float rpm_target = car->desc.engine.idle_rpm;
+      float rpm_target = ed->idle_rpm;
       float err_rpm    = rpm_target - car->engine_state.rpm;
       float norm_err   = err_rpm / fmaxf(500.0f, rpm_target);
       float P          = car->desc.ecu.idle_pid_p;
@@ -1410,22 +1514,35 @@ static lcc_result_t lcc__car_step(lcc_car_t *car, float dt_s) {
     }
 
     throttle_eff *= (1.0f - car->tc_cut);
+    tq_engine_comb = lcc__engine_torque_compute(car, car->engine_state.rpm, throttle_eff);
 
-    tq_engine = lcc__engine_torque_compute(car, car->engine_state.rpm, throttle_eff);
-
-    if(car->fuel_state.fuel_l <= 1e-3f) {
-      tq_engine                 = 0.0f;
+    if(!has_fuel) {
+      tq_engine_comb            = 0.0f;
       car->engine_state.running = 0;
       lcc__emit_event(car, LCC_EVENT_FUEL_STARVATION, 0, 0.0f);
     }
   }
 
-  /* clutch/TC converter to trans input */
-  float T_to_trans = 0.0f;
+  /* passive friction/pumping drag when not combusting */
+  if(!(car->engine_state.running && car->controls.ignition_switch)) {
+    float fr = lcc__curve1d_eval(&ed->friction_torque_nm_vs_rpm, car->engine_state.rpm);
+    if(fr > 0.0f) T_fric_drag = fr;
+  }
 
-  float clutch_k = lcc__saturate(car->trans_state.clutch_engagement);
-  float T_cap    = 800.0f * clutch_k;
-  T_to_trans     = tq_engine;
+  /* starter torque during cranking (power-limited) */
+  if(car->engine_state.cranking) {
+    float omega     = lcc__rpm_to_radps(car->engine_state.rpm);
+    float omega_eff = fmaxf(omega, LCC_ENGINE_STARTER_MIN_OMEGA_RADPS);
+    float P         = car->desc.starter.power_w;
+    float soc_scale = lcc__clampf(car->elec_state.battery_soc * 1.2f, 0.25f, 1.0f);
+    T_starter       = lcc__clampf((P * soc_scale) / omega_eff, 0.0f, LCC_ENGINE_STARTER_MAX_TORQUE_NM);
+  }
+
+  /* clutch/TC converter to trans input (only combustion torque goes to gearbox) */
+  float T_to_trans = 0.0f;
+  float clutch_k   = lcc__saturate(car->trans_state.clutch_engagement);
+  float T_cap      = 800.0f * clutch_k;
+  T_to_trans       = tq_engine_comb;
   if(fabsf(T_to_trans) > T_cap) T_to_trans = lcc__signf(T_to_trans) * T_cap;
 
   float Tw_total = T_to_trans * gear_ratio * final_drive * driveline_eff;
@@ -1488,11 +1605,16 @@ static lcc_result_t lcc__car_step(lcc_car_t *car, float dt_s) {
     mu_i[i] = lcc__tire_mu(&car->desc.tires[i], Fz_i[i], car->env.global_friction_scale, car->damage_state.tire_health[i]);
     lcc__tire_stiffness(&car->desc.tires[i], Fz_i[i], car->desc.wheels[i].width_m, &Cx_i[i], &Cy_i[i]);
 
-    /* relaxation dynamics  */
+    /* relaxation dynamics: default to ~wheel radius if not set; clamp into realistic band */
     {
-      float Vrel              = lcc__hypot2(vt_x[i], vt_y[i]);
-      float Lx                = fmaxf(0.0f, car->desc.tires[i].relaxation_length_long_m);
-      float Ly                = fmaxf(0.0f, car->desc.tires[i].relaxation_length_lat_m);
+      float Vrel = lcc__hypot2(vt_x[i], vt_y[i]);
+      float Lx   = car->desc.tires[i].relaxation_length_long_m;
+      float Ly   = car->desc.tires[i].relaxation_length_lat_m;
+      /* If unset/non-positive, use wheel radius; then clamp to typical 0.12–0.45 m band */
+      if(!(Lx > 0.0f)) Lx = r_i[i];
+      if(!(Ly > 0.0f)) Ly = r_i[i];
+      Lx                      = lcc__clampf(Lx, 0.12f, 0.45f);
+      Ly                      = lcc__clampf(Ly, 0.12f, 0.45f);
       car->slip_kappa_filt[i] = lcc__relax_filt(car->slip_kappa_filt[i], s_i[i], Vrel, Lx, dt_s);
       car->slip_alpha_filt[i] = lcc__relax_filt(car->slip_alpha_filt[i], a_i[i], Vrel, Ly, dt_s);
       s_eff[i]                = car->slip_kappa_filt[i];
@@ -1721,17 +1843,33 @@ static lcc_result_t lcc__car_step(lcc_car_t *car, float dt_s) {
   float eng_omega    = lcc__rpm_to_radps(car->engine_state.rpm);
   float load_omega   = lcc__rpm_to_radps(fabsf(gear_ratio * shaft_out_rpm));
   float Ieng         = fmaxf(0.02f, car->desc.engine.inertia_kgm2);
-  float domega_free  = (tq_engine - T_to_trans) / Ieng;
-  float domega_track = (load_omega - eng_omega) * (clutch_k);
+  float T_net        = T_starter + tq_engine_comb - T_to_trans - T_fric_drag;
+  float domega_free  = T_net / Ieng;
+  float domega_track = (load_omega - eng_omega) * clutch_k;
 
   eng_omega += (domega_free * (1.0f - clutch_k) + domega_track) * dt_s;
   car->engine_state.rpm = fmaxf(0.0f, lcc__radps_to_rpm(eng_omega));
 
-  /* stall detection */
+  /* catch during cranking */
+  if(!car->engine_state.running && car->engine_state.cranking && has_fuel && car->controls.ignition_switch) {
+    float catch_rpm = ed->idle_rpm * LCC_ENGINE_CATCH_RPM_FACTOR;
+    if(car->engine_crank_timer_s > LCC_ENGINE_CRANK_MIN_TIME_S && car->engine_state.rpm > catch_rpm) {
+      car->engine_state.running  = 1;
+      car->engine_state.cranking = 0;
+      car->engine_crank_timer_s  = 0.0f;
+      lcc__emit_event(car, LCC_EVENT_ENGINE_START, 0, 0.0f);
+    }
+  }
+
+  /* stall detection: more permissive in neutral vs loaded in gear */
   if(car->engine_state.running) {
-    int in_gear = (car->trans_state.gear_index != LCC_GEAR_NEUTRAL);
-    if(car->engine_state.rpm < car->desc.engine.stall_rpm && in_gear) {
-      car->engine_state.running = 0;
+    int   in_gear        = (car->trans_state.gear_index != LCC_GEAR_NEUTRAL) && (fabsf(gear_ratio) > 1e-3f);
+    int   clutch_engaged = (car->trans_state.clutch_engagement > 0.7f);
+    int   loaded         = (in_gear && clutch_engaged);
+    float stall_thresh   = ed->stall_rpm * (loaded ? 1.0f : 0.6f);
+    if(car->engine_state.rpm < stall_thresh) {
+      car->engine_state.running  = 0;
+      car->engine_state.cranking = 0;
       lcc__emit_event(car, LCC_EVENT_ENGINE_STALL, 0, 0.0f);
     }
   }
@@ -1755,23 +1893,72 @@ static lcc_result_t lcc__car_step(lcc_car_t *car, float dt_s) {
     world[1] += car->car_state.pos_world[1];
   }
 
-  /* electrics */
-  float base_consumers_w = 150.0f;
-  if(car->controls.starter && !car->engine_state.running) base_consumers_w += car->desc.starter.power_w;
-  if(car->elec_state.consumers_headlights) base_consumers_w += 110.0f;
-  float V      = car->desc.battery.nominal_voltage_v;
-  float I_load = base_consumers_w / fmaxf(V, 1.0f);
-  float I_alt  = 0.0f;
-  if(car->engine_state.rpm >= car->desc.alternator.cut_in_rpm && car->engine_state.running) {
-    float frac = lcc__clampf((car->engine_state.rpm - car->desc.alternator.cut_in_rpm) / 2000.0f, 0.0f, 1.0f);
-    I_alt      = car->desc.alternator.max_current_a * frac;
+  /* electrics: solve bus voltage with battery (OCV+R) and alternator (regulated with current limit) */
+  {
+    /* total constant-power loads on the bus */
+    float P_load_w = 150.0f; /* base consumers */
+    if(car->elec_state.consumers_headlights) P_load_w += 110.0f;
+    if(car->engine_state.cranking && !car->engine_state.running) {
+      /* electrical power draw higher than mechanical starter power by efficiency */
+      P_load_w += car->desc.starter.power_w / fmaxf(LCC_STARTER_EFF, 0.15f);
+    }
+
+    /* initial guess for bus voltage */
+    float V_guess = car->elec_state.bus_voltage_v > 1.0f ? car->elec_state.bus_voltage_v : (car->engine_state.running ? car->desc.alternator.regulator_voltage_v : lcc__batt_ocv(&car->desc.battery, car->elec_state.battery_soc));
+
+    float Tamb     = car->env.ambient_temp_c;
+    float soc      = car->elec_state.battery_soc;
+    float OCV      = lcc__batt_ocv(&car->desc.battery, soc);
+    float Rint     = lcc__batt_r_internal(&car->desc.battery, soc, Tamb);
+    float Vreg     = car->desc.alternator.regulator_voltage_v;
+    float I_altcap = lcc__alt_current_cap(&car->desc.alternator, car->engine_state.rpm, car->engine_state.running);
+
+    float V_bus  = V_guess;
+    float I_load = 0.0f, I_alt = 0.0f, I_batt = 0.0f;
+
+    for(int it = 0; it < 2; ++it) {
+      V_bus  = fmaxf(V_bus, 6.0f);
+      I_load = P_load_w / V_bus;
+
+      if(I_altcap > 0.0f) {
+        /* try regulated bus at Vreg */
+        float I_batt_req = (OCV - Vreg) / Rint; /* + means battery discharging */
+        float I_alt_req  = I_load - I_batt_req; /* alternator supplies remainder */
+        if(I_alt_req <= I_altcap) {
+          /* regulator holds */
+          V_bus  = Vreg;
+          I_alt  = fmaxf(0.0f, I_alt_req);
+          I_batt = I_load - I_alt;
+        } else {
+          /* alternator saturated, bus falls to battery terminal voltage */
+          I_alt  = I_altcap;
+          I_batt = I_load - I_alt;
+          V_bus  = OCV - I_batt * Rint;
+        }
+      } else {
+        /* alternator offline */
+        I_alt  = 0.0f;
+        I_batt = I_load;
+        V_bus  = OCV - I_batt * Rint;
+      }
+    }
+
+    /* SOC integration with temp-adjusted capacity */
+    float cap_as_eff = car->desc.battery.capacity_ah * 3600.0f * lcc__batt_cap_temp_scale(Tamb);
+    if(cap_as_eff > 1.0f) {
+      if(I_batt >= 0.0f) soc -= (I_batt * dt_s) / cap_as_eff;
+      else
+        soc += (-I_batt * dt_s) / cap_as_eff * lcc__clampf(car->desc.battery.charge_efficiency, 0.5f, 1.0f);
+      car->elec_state.battery_soc = lcc__saturate(soc);
+    }
+
+    car->elec_state.bus_voltage_v  = lcc__clampf(V_bus, 6.0f, 15.5f);
+    car->elec_state.alt_current_a  = I_alt;
+    car->elec_state.batt_current_a = I_batt;
   }
-  float I_net       = I_alt - I_load;
-  float capacity_as = car->desc.battery.capacity_ah * 3600.0f;
-  if(capacity_as > 1.0f) car->elec_state.battery_soc = lcc__clampf(car->elec_state.battery_soc + (I_net * dt_s) / capacity_as, 0.0f, 1.0f);
 
   /* fuel consumption */
-  float power_kw         = fmaxf(0.0f, tq_engine) * eng_omega / 1000.0f;
+  float power_kw         = fmaxf(0.0f, tq_engine_comb) * eng_omega / 1000.0f;
   float bsfc_l_per_kwh   = 0.32f;
   float fuel_lps         = (power_kw * bsfc_l_per_kwh) / 3600.0f;
   float idle_lps         = (car->engine_state.running && car->controls.throttle < 0.02f) ? 0.00015f : 0.0f;
@@ -1855,16 +2042,21 @@ void lcc_cooling_desc_init_defaults(lcc_cooling_desc_t *desc) {
 void lcc_battery_desc_init_defaults(lcc_battery_desc_t *desc) {
   if(!desc) return;
   lcc__pzero(desc);
-  desc->capacity_ah       = 60.0f;
-  desc->nominal_voltage_v = 12.6f;
-  desc->initial_soc       = 0.9f;
+  desc->capacity_ah             = 60.0f;
+  desc->nominal_voltage_v       = 12.6f;
+  desc->initial_soc             = 0.9f;
+  desc->internal_resistance_ohm = LCC_BATT_R_INTERNAL_OHM;
+  desc->ocv_full_v              = LCC_BATT_OCV_FULL_V;
+  desc->ocv_empty_v             = LCC_BATT_OCV_EMPTY_V;
+  desc->charge_efficiency       = LCC_BATT_CHARGE_EFF;
 }
 
 void lcc_alternator_desc_init_defaults(lcc_alternator_desc_t *desc) {
   if(!desc) return;
   lcc__pzero(desc);
-  desc->max_current_a = 90.0f;
-  desc->cut_in_rpm    = 1200.0f;
+  desc->max_current_a       = 90.0f;
+  desc->cut_in_rpm          = 1200.0f;
+  desc->regulator_voltage_v = LCC_ALT_REG_VOLTAGE_V;
 }
 
 void lcc_starter_desc_init_defaults(lcc_starter_desc_t *desc) {
@@ -2175,16 +2367,18 @@ lcc_result_t lcc_car_engine_start(lcc_car_t *car) {
   if(car->elec_state.battery_soc <= 0.05f) return LCC_ERR_BAD_STATE;
   if(car->fuel_state.fuel_l <= 0.01f) return LCC_ERR_BAD_STATE;
 
-  car->engine_state.running = 1;
-  if(car->engine_state.rpm < car->desc.engine.idle_rpm * 0.8f) car->engine_state.rpm = car->desc.engine.idle_rpm * 0.8f;
-  lcc__emit_event(car, LCC_EVENT_ENGINE_START, 0, 0.0f);
+  /* request cranking; actual start event is emitted when it "catches" in step */
+  car->engine_state.cranking = 1;
+  car->engine_crank_timer_s  = 0.0f;
+  if(car->engine_state.rpm < 50.0f) car->engine_state.rpm = 50.0f; /* small nudge so starter torque isn't infinite */
   return LCC_OK;
 }
 
 lcc_result_t lcc_car_engine_stop(lcc_car_t *car) {
   if(!car) return LCC_ERR_INVALID_ARG;
-  if(!car->engine_state.running) return LCC_OK;
-  car->engine_state.running = 0;
+  if(!car->engine_state.running && !car->engine_state.cranking) return LCC_OK;
+  car->engine_state.running  = 0;
+  car->engine_state.cranking = 0;
   lcc__emit_event(car, LCC_EVENT_ENGINE_STOP, 0, 0.0f);
   return LCC_OK;
 }
