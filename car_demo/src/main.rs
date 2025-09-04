@@ -631,7 +631,7 @@ impl App {
                 }
                 d.aero.lift_coefficient_front = -0.5;
                 d.aero.lift_coefficient_rear = -1.0;
-                d.transmission.type_ = LCC_TRANS_DCT;
+                d.transmission.type_ = LCC_TRANS_MANUAL;
                 d.transmission.final_drive_ratio = 3.3;
             }
         }
@@ -719,8 +719,6 @@ impl App {
             max_trace_points: 4000,
             trace_point_spacing_m: 0.25,
         };
-        // Start engine initially
-        let _ = ffi::lcc_car_engine_start(this.car);
         // Set driver aids
         ffi::lcc_car_set_abs(this.car, if this.abs_on { LCC_ABS_ON } else { LCC_ABS_OFF });
         ffi::lcc_car_set_tc(this.car, if this.tc_on { LCC_TC_ON } else { LCC_TC_OFF });
@@ -735,8 +733,6 @@ impl App {
         }
         self.desc.environment = self.env;
         self.car = ffi::lcc_car_create(&self.desc as *const _);
-        // start engine
-        let _ = ffi::lcc_car_engine_start(self.car);
         // aids
         ffi::lcc_car_set_abs(self.car, if self.abs_on { LCC_ABS_ON } else { LCC_ABS_OFF });
         ffi::lcc_car_set_tc(self.car, if self.tc_on { LCC_TC_ON } else { LCC_TC_OFF });

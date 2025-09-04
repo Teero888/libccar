@@ -1,180 +1,236 @@
-/* libccar_test.c */
-#include <math.h>
-#include <stdio.h>
+/* example.c - minimal demo for libccar
+   Build:
+     - Linux/macOS: cc -O2 -std=c99 example.c -lm -o example
+     - Windows (MSVC): cl /O2 example.c
+   Notes:
+     - If your libccar.h does NOT embed the implementation, define LCC_IMPLEMENTATION
+       before including it here. The version pasted in the prompt already includes it.
+*/
 
-#define LCC_IMPLEMENTATION
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+
 #include "libccar.h"
 
-/* simple event recorder */
-typedef struct test_events_s {
-  lcc_event_t evts[256];
-  int         count;
-} test_events_t;
-
-static void on_event(const lcc_event_t *evt, void *user) {
-  test_events_t *te = (test_events_t *)user;
-  if(te && te->count < (int)(sizeof(te->evts) / sizeof(te->evts[0]))) te->evts[te->count++] = *evt;
-  const char *name = "event";
-  switch(evt->type) {
-  case LCC_EVENT_ENGINE_START: name = "ENGINE_START"; break;
-  case LCC_EVENT_ENGINE_STOP: name = "ENGINE_STOP"; break;
-  case LCC_EVENT_GEAR_CHANGE: name = "GEAR_CHANGE"; break;
-  case LCC_EVENT_ENGINE_STALL: name = "ENGINE_STALL"; break;
-  case LCC_EVENT_ABS_ACTIVE: name = "ABS_ACTIVE"; break;
-  case LCC_EVENT_TC_ACTIVE: name = "TC_ACTIVE"; break;
-  case LCC_EVENT_ESC_ACTIVE: name = "ESC_ACTIVE"; break;
-  case LCC_EVENT_OVERHEAT: name = "OVERHEAT"; break;
-  case LCC_EVENT_FUEL_STARVATION: name = "FUEL_STARVATION"; break;
-  default: break;
+static const char* evt_name(lcc_event_type_t t) {
+  switch(t) {
+    case LCC_EVENT_ENGINE_START:     return "ENGINE_START";
+    case LCC_EVENT_ENGINE_STOP:      return "ENGINE_STOP";
+    case LCC_EVENT_GEAR_CHANGE:      return "GEAR_CHANGE";
+    case LCC_EVENT_ENGINE_STALL:     return "ENGINE_STALL";
+    case LCC_EVENT_ABS_ACTIVE:       return "ABS_ACTIVE";
+    case LCC_EVENT_TC_ACTIVE:        return "TC_ACTIVE";
+    case LCC_EVENT_ESC_ACTIVE:       return "ESC_ACTIVE";
+    case LCC_EVENT_OVERHEAT:         return "OVERHEAT";
+    case LCC_EVENT_FUEL_STARVATION:  return "FUEL_STARVATION";
+    default:                         return "UNKNOWN";
   }
-  printf("[%.3f] %s i32=%d f32=%.3f\n", evt->time_s, name, evt->data_i32, evt->data_f32);
 }
 
-/* helper: print a quick line of core telemetry */
-static void print_line(const lcc_car_t *car, const char *tag) {
-  lcc_car_state_t          cs;
-  lcc_engine_state_t       es;
-  lcc_transmission_state_t ts;
-  lcc_brake_state_t        bs;
-  lcc_car_get_car_state(car, &cs);
-  lcc_car_get_engine_state(car, &es);
-  lcc_car_get_transmission_state(car, &ts);
-  lcc_car_get_brake_state(car, &bs);
-  printf("%s t=%.2f v=%.2f m/s yaw=%.2fdeg rpm=%.0f gear=%d\n", tag, cs.time_s, cs.speed_mps, lcc_rad_to_deg(cs.yaw_rad), es.rpm, ts.gear_index);
+static void on_event(const lcc_event_t* evt, void* user) {
+  (void)user;
+  printf("[%.3f] EVENT: %s", (double)evt->time_s, evt_name(evt->type));
+  if(evt->type == LCC_EVENT_GEAR_CHANGE) {
+    printf(" -> gear=%d", evt->data_i32);
+  } else if(evt->type == LCC_EVENT_TC_ACTIVE) {
+    printf(" -> cut=%.2f", evt->data_f32);
+  } else if(evt->type == LCC_EVENT_OVERHEAT) {
+    printf(" -> coolant=%.1f C", evt->data_f32);
+  }
+  printf("\n");
 }
 
-/* step helper with clamped dt */
-static lcc_result_t step_seconds(lcc_car_t *car, double seconds, const lcc_controls_t *ctrl) {
-  const float    dt    = 1.0f / 200.0f; /* 200 Hz */
-  int            steps = (int)ceil(seconds / dt);
-  lcc_controls_t c     = *ctrl;
-  for(int i = 0; i < steps; ++i) {
-    lcc_car_set_controls(car, &c);
-    lcc_result_t r = lcc_car_step(car, dt);
-    if(r != LCC_OK) return r;
-  }
-  return LCC_OK;
-}
+static void print_status(const lcc_car_t* car, const lcc_controls_t* ctrl) {
+  const lcc_car_state_t* cs = &car->car_state;
 
-/* build a simple engine map (WOT torque and friction) */
-static void fill_engine_maps(lcc_engine_desc_t *eng) {
-  static const lcc_curve1d_point_t wot_pts[]  = { { 800, 120 }, { 1200, 150 }, { 1800, 175 }, { 2400, 195 }, { 3000, 210 }, { 3600, 220 },
-     { 4200, 225 }, { 4800, 225 }, { 5400, 215 }, { 6000, 200 }, { 6500, 180 } };
-  static const lcc_curve1d_point_t fric_pts[] = { { 0, 8 }, { 1000, 10 }, { 2000, 14 }, { 3000, 18 }, { 4000, 24 }, { 5000, 32 }, { 6000, 42 },
-    { 7000, 54 } };
-  static const lcc_curve1d_point_t thr_pts[]  = { { 0.0f, 0.0f }, { 1.0f, 1.0f } };
-
-  eng->wot_torque_nm_vs_rpm.points = wot_pts;
-  eng->wot_torque_nm_vs_rpm.count  = (int)(sizeof(wot_pts) / sizeof(wot_pts[0]));
-
-  eng->friction_torque_nm_vs_rpm.points = fric_pts;
-  eng->friction_torque_nm_vs_rpm.count  = (int)(sizeof(fric_pts) / sizeof(fric_pts[0]));
-
-  eng->throttle_map.points = thr_pts;
-  eng->throttle_map.count  = (int)(sizeof(thr_pts) / sizeof(thr_pts[0]));
-}
-
-/* run-through test, returns 0 on success */
-int lcc_run_self_test(void) {
-  printf("libccar version: %s\n", lcc_version_string());
-
-  /* 1) Build a default car */
-  lcc_car_desc_t desc;
-  lcc_car_desc_init_defaults(&desc);
-
-  /* steerable fronts, driven fronts (FWD by default) */
-  desc.driveline.layout                = LCC_LAYOUT_FWD;
-  desc.transmission.type               = LCC_TRANS_MANUAL;
-  desc.transmission.auto_upshift_rpm   = 6200.0f;
-  desc.transmission.auto_downshift_rpm = 1200.0f;
-
-  fill_engine_maps(&desc.engine);
-
-  /* optionally tweak tires for more dynamic response */
-  for(int i = 0; i < desc.wheel_count; ++i) {
-    desc.tires[i].mu_nominal   = 1.1f;
-    desc.tires[i].pressure_kpa = 230.0f;
+  int gear = car->trans_state.gear_index; /* 0=R, 1=N, 2..=forward */
+  const char* gear_str = "N";
+  char buf[8] = {0};
+  if(gear == LCC_GEAR_REVERSE) gear_str = "R";
+  else if(gear == LCC_GEAR_NEUTRAL) gear_str = "N";
+  else {
+    snprintf(buf, sizeof(buf), "%d", gear - 1);
+    gear_str = buf;
   }
 
-  /* environment */
-  lcc_environment_init_defaults(&desc.environment);
-  desc.environment.global_friction_scale = 1.0f;
-  desc.environment.ambient_temp_c        = 22.0f;
-
-  /* 2) Create car */
-  lcc_car_t *car = lcc_car_create(&desc);
-  if(!car) {
-    fprintf(stderr, "Failed to create car\n");
-    return -1;
-  }
-
-  /* 3) Subscribe to events */
-  test_events_t ev = { 0 };
-  lcc_car_set_event_callback(car, on_event, &ev);
-
-  /* 4) Start engine */
-  if(lcc_car_engine_start(car) != LCC_OK) {
-    fprintf(stderr, "Engine start failed\n");
-    lcc_car_destroy(car);
-    return -2;
-  }
-
-  /* 5) Quick utility checks */
-  float bmin[2], bmax[2];
-  lcc_car_get_local_bounds(car, bmin, bmax);
-  printf("local bounds: min(%.2f,%.2f) max(%.2f,%.2f)\n", bmin[0], bmin[1], bmax[0], bmax[1]);
-  float wheel_pos[8][2];
-  int   wc = lcc_car_get_wheel_local_positions(car, wheel_pos, 8);
-  for(int i = 0; i < wc; ++i) printf("wheel[%d] local pos = (%.3f, %.3f)\n", i, wheel_pos[i][0], wheel_pos[i][1]);
-
-  /* 6) Drive phases */
-  lcc_controls_t c  = { 0 };
-  c.ignition_switch = 1;
-  c.starter         = 0;
-  c.clutch          = 0.0f;
-  c.steer           = 0.0f;
-  c.throttle        = 0.2f;
-
-  /* phase A: gentle rollout 1.5s */
-  step_seconds(car, 1.5, &c);
-  print_line(car, "phaseA");
-
-  /* ramp throttle to 1.0 and hold for 3s to trigger upshifts/TC */
-  c.throttle = 1.0f;
-  step_seconds(car, 3.0, &c);
-  print_line(car, "phaseB");
-
-  /* phase C: induce some yaw error by steering for 1.5s to possibly see ESC */
-  c.steer = 0.5f;
-  step_seconds(car, 1.5, &c);
-  print_line(car, "phaseC");
-
-  /* phase D: hard braking 2s to trigger ABS */
-  c.steer    = 0.0f;
-  c.throttle = 0.0f;
-  c.brake    = 1.0f;
-  step_seconds(car, 2.0, &c);
-  print_line(car, "phaseD");
-
-  /* back to coasting 1s */
-  c.brake = 0.0f;
-  step_seconds(car, 1.0, &c);
-  print_line(car, "phaseE");
-
-  /* 7) Unit helpers sanity */
-  float d  = 90.0f;
-  float r  = lcc_deg_to_rad(d);
-  float d2 = lcc_rad_to_deg(r);
-  printf("units: %.2f deg -> %.3f rad -> %.2f deg\n", d, r, d2);
-
-  /* 8) Wrap up */
-  printf("events captured: %d\n", ev.count);
-  lcc_car_destroy(car);
-  return 0;
+  float speed_kmh = cs->speed_mps * 3.6f;
+  printf("[%.2f] v=%.1f km/h  gear=%s  rpm=%.0f  thr=%.0f%%  brake=%.0f%%  Vbus=%.2f V  Ialt=%.1f A  Ibatt=%.1f A  Coolant=%.1f C\n",
+    (double)cs->time_s,
+    speed_kmh,
+    gear_str,
+    car->engine_state.rpm,
+    ctrl->throttle * 100.0f,
+    ctrl->brake * 100.0f,
+    car->elec_state.bus_voltage_v,
+    car->elec_state.alt_current_a,
+    car->elec_state.batt_current_a,
+    car->cool_state.coolant_temp_c
+  );
 }
 
 int main(void) {
-  int rc = lcc_run_self_test();
-  printf("self-test %s (rc=%d)\n", rc == 0 ? "PASSED" : "FAILED", rc);
-  return rc;
+  printf("libccar version: %s\n", lcc_version_string());
+
+  /* Set up a car from defaults */
+  lcc_car_desc_t desc;
+  lcc_car_desc_init_defaults(&desc);
+
+  /* Tweak some descriptor bits (optional) */
+  desc.transmission.type = LCC_TRANS_MANUAL;    /* keep manual; we will shift ourselves */
+  desc.ecu.auto_clutch   = 1;                   /* auto clutch during shifts for simplicity */
+  desc.ecu.abs_mode      = LCC_ABS_ON;
+  desc.ecu.tc_mode       = LCC_TC_ON;
+  desc.ecu.esc_mode      = LCC_ESC_ON;
+
+  /* Slight breeze headwind and reasonable ambient */
+  desc.environment.ambient_temp_c = 22.0f;
+  desc.environment.air_density    = 1.20f;
+  desc.environment.wind_world[0]  = -2.0f; /* headwind */
+  desc.environment.wind_world[1]  = 0.0f;
+
+  /* Create car */
+  lcc_car_t* car = lcc_car_create(&desc);
+  if(!car) {
+    fprintf(stderr, "Failed to create car\n");
+    return 1;
+  }
+
+  /* Subscribe to events */
+  lcc_car_set_event_callback(car, on_event, NULL);
+
+  /* Optionally auto-generate a more exciting engine from typical datasheet values */
+  {
+    lcc_engine_simple_spec_t spec;
+    lcc_engine_simple_spec_init_defaults(&spec);
+    spec.rated_power_kw   = 220.0f;       /* ~300 hp */
+    spec.rated_power_rpm  = 6200.0f;
+    spec.redline_rpm      = 6800.0f;
+    spec.idle_rpm         = 850.0f;
+    spec.forced_induction = LCC_FI_TURBO;
+    spec.boost_target_kpa = 110.0f;       /* ~1.1 bar gauge */
+
+    lcc_result_t r = lcc_car_generate_engine_from_simple_spec(car, &spec);
+    if(r != LCC_OK) {
+      fprintf(stderr, "Engine generation failed (%d)\n", r);
+    }
+  }
+
+  /* Start position/orientation (optional) */
+  {
+    float pos[2] = {0.0f, 0.0f};
+    float yaw    = lcc_deg_to_rad(0.0f);
+    lcc_car_set_pos(car, pos, yaw);
+  }
+
+  /* Controls */
+  lcc_controls_t ctl = {0};
+  ctl.ignition_switch = 1; /* turn ignition on */
+
+  /* Headlights off to start; we can toggle later */
+  car->elec_state.consumers_headlights = 0;
+
+  /* Crank engine until it catches (or up to 3 s) */
+  {
+    float dt = 1.0f / 120.0f;
+    double t_end = car->car_state.time_s + 3.0;
+    ctl.starter = 1;
+    while(car->car_state.time_s < t_end && !car->engine_state.running) {
+      lcc_car_set_controls(car, &ctl);
+      lcc_car_step(car, dt);
+    }
+    ctl.starter = 0; /* release starter */
+    lcc_car_set_controls(car, &ctl);
+  }
+
+  if(!car->engine_state.running) {
+    fprintf(stderr, "Engine did not start. Exiting.\n");
+    lcc_car_destroy(car);
+    return 1;
+  }
+
+  /* Let it idle a bit */
+  {
+    float dt = 1.0f / 120.0f;
+    for(int i = 0; i < 120; ++i) {
+      lcc_car_set_controls(car, &ctl);
+      lcc_car_step(car, dt);
+    }
+  }
+
+  /* Select 1st gear (0=R, 1=N, 2=1st) */
+  lcc_car_request_gear(car, 2);
+
+  /* Drive scenario:
+     - 0..10 s: accelerate with throttle ramp, shift up near redline
+     - 4..8 s: turn headlights on to show electrical behavior
+     - 12..15 s: full brakes (ABS demo), clutch in to avoid stall
+  */
+  {
+    float dt = 1.0f / 240.0f;
+    double next_print = car->car_state.time_s;
+    double t_final = car->car_state.time_s + 16.0;
+
+    while(car->car_state.time_s < t_final) {
+      double t = car->car_state.time_s;
+      float rpm = car->engine_state.rpm;
+
+      /* Headlights toggle for fun */
+      if(t > 4.0 && t < 8.0) car->elec_state.consumers_headlights = 1;
+      else                   car->elec_state.consumers_headlights = 0;
+
+      /* Control phases */
+      if(t < 10.0) {
+        /* Accelerate */
+        float ramp = (float)fmin(1.0, (t) / 1.2); /* reach full throttle in ~1.2s */
+        ctl.throttle = ramp;
+        ctl.brake    = 0.0f;
+        ctl.clutch   = 0.0f; /* engaged */
+        ctl.steer    = 0.0f;
+
+        /* Shift up near 6400 rpm if not already shifting */
+        if(!car->trans_state.shifting && rpm > 6400.0f) {
+          lcc_car_shift_up(car);
+        }
+      } else if(t < 12.0) {
+        /* Cruise a bit */
+        ctl.throttle = 0.25f;
+        ctl.brake    = 0.0f;
+        ctl.clutch   = 0.0f;
+        ctl.steer    = 0.0f;
+      } else if(t < 15.0) {
+        /* Hard braking with clutch in so engine doesn't stall */
+        ctl.throttle = 0.0f;
+        ctl.brake    = 1.0f;
+        ctl.clutch   = 1.0f; /* fully disengaged */
+        ctl.steer    = 0.0f;
+      } else {
+        /* Roll to a stop */
+        ctl.throttle = 0.0f;
+        ctl.brake    = 0.2f;
+        ctl.clutch   = 1.0f;
+      }
+
+      lcc_car_set_controls(car, &ctl);
+      lcc_car_step(car, dt);
+
+      if((double)car->car_state.time_s >= next_print) {
+        print_status(car, &ctl);
+        next_print += 0.10; /* 10 Hz status */
+      }
+    }
+  }
+
+  /* Query wheel world positions just to show API usage */
+  {
+    float wheel_pos[LCC_MAX_WHEELS][2];
+    int n = lcc_car_get_wheel_global_positions(car, wheel_pos, LCC_MAX_WHEELS);
+    for(int i = 0; i < n; ++i) {
+      printf("Wheel %d world pos: (%.2f, %.2f)\n", i, wheel_pos[i][0], wheel_pos[i][1]);
+    }
+  }
+
+  lcc_car_destroy(car);
+  return 0;
 }
