@@ -32,6 +32,14 @@ extern "C" {
 #define LCC_TAU (2.0f * LCC_PI)
 #endif
 
+/* engine map generation */
+#ifndef LCC_ENG_GEN_WOT_POINTS
+#define LCC_ENG_GEN_WOT_POINTS 9
+#endif
+#ifndef LCC_ENG_GEN_FRICT_POINTS
+#define LCC_ENG_GEN_FRICT_POINTS 6
+#endif
+
 /* electrics tuning */
 #ifndef LCC_ALT_REG_VOLTAGE_V
 #define LCC_ALT_REG_VOLTAGE_V 14.2f
@@ -107,7 +115,7 @@ extern "C" {
 #define LCC_API extern
 #endif
 
-/* ============================== END configuration macros ============================== }}}*/
+/*}}}*/
 
 /* ============================== enums ============================== {{{*/
 
@@ -142,7 +150,7 @@ typedef enum lcc_tc_mode_e { LCC_TC_OFF = 0, LCC_TC_ON = 1 } lcc_tc_mode_t;
 
 typedef enum lcc_esc_mode_e { LCC_ESC_OFF = 0, LCC_ESC_ON = 1 } lcc_esc_mode_t;
 
-/* =============================== END enums  =============================== }}}*/
+/*}}}*/
 
 /* ============================== types ============================== {{{*/
 
@@ -224,10 +232,6 @@ typedef struct {
 
   float wastegate_pressure_kpa;
 
-  /* TODO: maybe implement the spar cur instead of fuel cut */
-  lcc_bool_t fuel_cut_on_redline;
-  lcc_bool_t spark_cut_on_redline;
-
   float coolant_heat_capacity_j_per_k;
   float oil_heat_capacity_j_per_k;
 } lcc_engine_desc_t;
@@ -263,6 +267,19 @@ typedef struct {
 typedef struct {
   float power_w;
 } lcc_starter_desc_t;
+
+/* simple engine spec (user-facing, from common datasheet values) */
+typedef struct {
+  float                  rated_power_kw;   /* peak power (required) */
+  float                  rated_power_rpm;  /* rpm of rated power (0 -> derive from redline & FI) */
+  float                  redline_rpm;      /* required */
+  float                  idle_rpm;         /* 0 -> default */
+  float                  stall_rpm;        /* 0 -> default */
+  float                  peak_torque_nm;   /* 0 -> derive typical from power & FI */
+  float                  peak_torque_rpm;  /* 0 -> derive typical from FI */
+  lcc_forced_induction_t forced_induction; /* FI_NONE/FI_TURBO/FI_SUPERCHARGER/FI_TWINCHARGED */
+  float                  boost_target_kpa; /* target gauge boost at WOT (turbo/super) */
+} lcc_engine_simple_spec_t;
 
 /* ecu and driver aids */
 typedef struct {
@@ -482,6 +499,16 @@ typedef struct {
 
   float engine_crank_timer_s;
 
+  /* generated engine maps (owned by car; freed on destroy or when replaced) */
+  lcc_curve1d_point_t *owned_wot_pts;
+  int                  owned_wot_count;
+  lcc_curve1d_point_t *owned_fric_pts;
+  int                  owned_fric_count;
+  lcc_curve1d_point_t *owned_thr_pts;
+  int                  owned_thr_count;
+  lcc_map2d_point_t   *owned_boost_pts;
+  int                  owned_boost_count;
+
   /* tire slip dynamics states for Pacejka */
   float slip_kappa_filt[LCC_MAX_WHEELS];
   float slip_alpha_filt[LCC_MAX_WHEELS];
@@ -495,7 +522,7 @@ typedef struct {
   double last_esc_evt_time;
 } lcc_car_t;
 
-/* =============================== END types  =============================== }}}*/
+/*}}}*/
 
 /* ============================== API declarations ============================== {{{*/
 
@@ -522,6 +549,9 @@ LCC_API void lcc_brake_desc_init_defaults(lcc_brake_desc_t *desc);
 LCC_API void lcc_arb_desc_init_defaults(lcc_arb_desc_t *desc);
 LCC_API void lcc_steering_desc_init_defaults(lcc_steering_desc_t *desc);
 LCC_API void lcc_environment_init_defaults(lcc_environment_t *env);
+LCC_API void lcc_engine_simple_spec_init_defaults(lcc_engine_simple_spec_t *spec);
+
+LCC_API lcc_result_t lcc_car_generate_engine_from_simple_spec(lcc_car_t *car, const lcc_engine_simple_spec_t *spec);
 
 /* lifecycle */
 LCC_API lcc_car_t   *lcc_car_create(const lcc_car_desc_t *desc);
@@ -547,8 +577,6 @@ LCC_API lcc_result_t lcc_car_set_arb_params(lcc_car_t *car, const lcc_arb_desc_t
 LCC_API lcc_result_t lcc_car_set_steering_params(lcc_car_t *car, const lcc_steering_desc_t *steer);
 
 /* powertrain controls */
-LCC_API lcc_result_t lcc_car_engine_start(lcc_car_t *car);
-LCC_API lcc_result_t lcc_car_engine_stop(lcc_car_t *car);
 LCC_API lcc_result_t lcc_car_request_gear(lcc_car_t *car, int gear_index);
 LCC_API lcc_result_t lcc_car_shift_up(lcc_car_t *car);
 LCC_API lcc_result_t lcc_car_shift_down(lcc_car_t *car);
@@ -569,23 +597,9 @@ LCC_API void lcc_car_get_pos(const lcc_car_t *car, float pos_world_out[2], float
 LCC_API void lcc_car_set_velocity(lcc_car_t *car, const float vel_world[2], float yaw_rate_radps);
 LCC_API void lcc_car_get_velocity(const lcc_car_t *car, float vel_world_out[2], float *yaw_rate_radps_out);
 
-/* fetching states */
-LCC_API void lcc_car_get_car_state(const lcc_car_t *car, lcc_car_state_t *out);
-LCC_API void lcc_car_get_engine_state(const lcc_car_t *car, lcc_engine_state_t *out);
-LCC_API void lcc_car_get_transmission_state(const lcc_car_t *car, lcc_transmission_state_t *out);
-LCC_API void lcc_car_get_brake_state(const lcc_car_t *car, lcc_brake_state_t *out);
-LCC_API void lcc_car_get_electrics_state(const lcc_car_t *car, lcc_electrics_state_t *out);
-LCC_API void lcc_car_get_fuel_state(const lcc_car_t *car, lcc_fuel_state_t *out);
-LCC_API void lcc_car_get_cooling_state(const lcc_car_t *car, lcc_cooling_state_t *out);
-LCC_API void lcc_car_get_wheel_state(const lcc_car_t *car, int wheel_index, lcc_wheel_state_t *out);
-
-/* damage and failures */
-LCC_API void lcc_car_get_damage_state(const lcc_car_t *car, lcc_damage_state_t *out);
-LCC_API void lcc_car_set_damage_state(lcc_car_t *car, const lcc_damage_state_t *in);
-
 /* utilities */
 LCC_API void lcc_car_get_local_bounds(const lcc_car_t *car, float min_local_out[2], float max_local_out[2]);
-LCC_API int  lcc_car_get_wheel_local_positions(const lcc_car_t *car, float out_positions[][2], int max_wheels);
+LCC_API int  lcc_car_get_wheel_global_positions(const lcc_car_t *car, float out_positions[][2], int max_wheels);
 
 /* event subscription */
 LCC_API void lcc_car_set_event_callback(lcc_car_t *car, lcc_event_cb callback, void *user);
@@ -594,7 +608,7 @@ LCC_API void lcc_car_set_event_callback(lcc_car_t *car, lcc_event_cb callback, v
 LCC_API float lcc_deg_to_rad(float deg);
 LCC_API float lcc_rad_to_deg(float rad);
 
-/* =============================== END API declerations  =============================== }}}*/
+/*}}}*/
 
 #ifdef __cplusplus
 }
@@ -683,6 +697,10 @@ static float lcc__hypot2(float x, float y) {
   return sqrtf(x * x + y * y);
 }
 
+static float lcc__smoothstep2(float x) {
+  return x * x * x * (10.0f + x * (-15.0f + 6.0f * x)); /* smootherstep */
+}
+
 /* vector helpers using float[2] */
 static void lcc__v2_zero(float a[2]) {
   a[0] = 0.0f;
@@ -750,12 +768,6 @@ static float lcc__radps_to_rpm(float radps) {
   return radps * (60.0f / LCC_TAU);
 }
 
-/* simple low-pass filter */
-static float lcc__lp(float prev, float target, float cutoff_hz, float dt) {
-  float a = 1.0f - expf(-2.0f * LCC_PI * lcc__clampf(cutoff_hz, 0.0f, 1000.0f) * lcc__clampf(dt, 0.0f, 1.0f));
-  return prev + a * (target - prev);
-}
-
 /* event emit helper forward */
 static void lcc__emit_event(lcc_car_t *car, lcc_event_type_t type, int data_i32, float data_f32);
 
@@ -799,6 +811,127 @@ static float lcc__alt_current_cap(const lcc_alternator_desc_t *alt, float rpm, l
   if(rpm < alt->cut_in_rpm) return 0.0f;
   float frac = lcc__clampf((rpm - alt->cut_in_rpm) / 2000.0f, 0.0f, 1.0f);
   return alt->max_current_a * frac;
+}
+
+/* free any owned generated maps */
+static void lcc__free_owned_engine_maps(lcc_car_t *car) {
+  if(!car) return;
+  if(car->owned_wot_pts) {
+    lcc__free(car->owned_wot_pts, lcc__alloc_user);
+    car->owned_wot_pts   = NULL;
+    car->owned_wot_count = 0;
+  }
+  if(car->owned_fric_pts) {
+    lcc__free(car->owned_fric_pts, lcc__alloc_user);
+    car->owned_fric_pts   = NULL;
+    car->owned_fric_count = 0;
+  }
+  if(car->owned_thr_pts) {
+    lcc__free(car->owned_thr_pts, lcc__alloc_user);
+    car->owned_thr_pts   = NULL;
+    car->owned_thr_count = 0;
+  }
+  if(car->owned_boost_pts) {
+    lcc__free(car->owned_boost_pts, lcc__alloc_user);
+    car->owned_boost_pts   = NULL;
+    car->owned_boost_count = 0;
+  }
+}
+
+static void lcc__engine_shape_params(lcc_forced_induction_t fi, float redline, float *out_tpeak_mult, float *out_rpm_tpeak, float *out_rpm_pwr) {
+  float tmult = 1.20f; /* Tpeak ~ k * T@P_rated */
+  float rpm_t = 0.45f * redline;
+  float rpm_p = 0.87f * redline;
+  switch(fi) {
+  default:
+  case LCC_FI_NONE:
+    tmult = 1.20f;
+    rpm_t = 0.45f * redline;
+    rpm_p = 0.87f * redline;
+    break;
+  case LCC_FI_TURBO:
+    tmult = 1.45f;
+    rpm_t = 0.35f * redline;
+    rpm_p = 0.80f * redline;
+    break;
+  case LCC_FI_SUPERCHARGER:
+    tmult = 1.35f;
+    rpm_t = 0.40f * redline;
+    rpm_p = 0.85f * redline;
+    break;
+  case LCC_FI_TWINCHARGED:
+    tmult = 1.50f;
+    rpm_t = 0.35f * redline;
+    rpm_p = 0.82f * redline;
+    break;
+  }
+  if(out_tpeak_mult) *out_tpeak_mult = tmult;
+  if(out_rpm_tpeak) *out_rpm_tpeak = fmaxf(1000.0f, rpm_t);
+  if(out_rpm_pwr) *out_rpm_pwr = fmaxf(1500.0f, rpm_p);
+}
+
+static float lcc__kpa_target_from_fi(lcc_forced_induction_t fi, float user_target) {
+  if(user_target > 0.0f) return user_target;
+  switch(fi) {
+  default:
+  case LCC_FI_NONE: return 0.0f;
+  case LCC_FI_TURBO: return 100.0f;       /* ~1 bar gauge */
+  case LCC_FI_SUPERCHARGER: return 60.0f; /* ~0.6 bar */
+  case LCC_FI_TWINCHARGED: return 120.0f; /* 1.2 bar */
+  }
+}
+
+static void lcc__make_throttle_map_points(float gamma, lcc_curve1d_point_t *pts, int *count_out) {
+  static const float xs[5] = { 0.0f, 0.25f, 0.5f, 0.75f, 1.0f };
+  for(int i = 0; i < 5; ++i) {
+    float x  = xs[i];
+    float y  = powf(lcc__saturate(x), lcc__clampf(gamma, 0.5f, 1.5f));
+    pts[i].x = x;
+    pts[i].y = y;
+  }
+  if(count_out) *count_out = 5;
+}
+
+static void lcc__make_boost_map_points(lcc_forced_induction_t fi, float redline, float target_kpa, lcc_map2d_point_t *pts, int *count_out) {
+  int n = 0;
+  if(fi == LCC_FI_NONE || target_kpa <= 1.0f) {
+    if(count_out) *count_out = 0;
+    return;
+  }
+  float rpm_nodes[7];
+  rpm_nodes[0] = 0.0f;
+  rpm_nodes[1] = 0.20f * redline;
+  rpm_nodes[2] = 0.30f * redline;
+  rpm_nodes[3] = 0.40f * redline;
+  rpm_nodes[4] = 0.55f * redline;
+  rpm_nodes[5] = 0.75f * redline;
+  rpm_nodes[6] = 0.95f * redline;
+
+  float thr_nodes[5] = { 0.2f, 0.4f, 0.6f, 0.8f, 1.0f };
+
+  float spool_lo = (fi == LCC_FI_TURBO || fi == LCC_FI_TWINCHARGED) ? (0.28f * redline) : (0.10f * redline);
+  float spool_hi = (fi == LCC_FI_TURBO || fi == LCC_FI_TWINCHARGED) ? (0.48f * redline) : (0.20f * redline);
+
+  for(int i = 0; i < 7; ++i) {
+    float rpm = rpm_nodes[i];
+    float s   = 1.0f;
+    if(fi == LCC_FI_TURBO || fi == LCC_FI_TWINCHARGED) {
+      float t = (rpm - spool_lo) / fmaxf(200.0f, spool_hi - spool_lo);
+      s       = lcc__saturate(lcc__smoothstep2(t));
+    } else if(fi == LCC_FI_SUPERCHARGER) {
+      s = lcc__saturate(0.5f + 0.5f * (rpm / fmaxf(1000.0f, redline))); /* slight rise with rpm */
+    }
+    for(int j = 0; j < 5; ++j) {
+      float th = thr_nodes[j];
+      float tn = powf(th, (fi == LCC_FI_TURBO || fi == LCC_FI_TWINCHARGED) ? 1.1f : 1.0f);
+      float k  = target_kpa * s * tn;
+      pts[n].x = rpm;
+      pts[n].y = th;
+      pts[n].v = k;
+      n++;
+    }
+  }
+  if(count_out) *count_out = n;
 }
 
 /*}}}*/
@@ -888,6 +1021,16 @@ static void lcc__init_runtime(lcc_car_t *car) {
     float ocv                     = car->desc.battery.ocv_empty_v + (car->desc.battery.ocv_full_v - car->desc.battery.ocv_empty_v) * lcc__saturate(soc);
     car->elec_state.bus_voltage_v = ocv;
   }
+
+  /* generated engine maps ownership init */
+  car->owned_wot_pts     = NULL;
+  car->owned_wot_count   = 0;
+  car->owned_fric_pts    = NULL;
+  car->owned_fric_count  = 0;
+  car->owned_thr_pts     = NULL;
+  car->owned_thr_count   = 0;
+  car->owned_boost_pts   = NULL;
+  car->owned_boost_count = 0;
 
   car->car_state.mass_kg = car->desc.chassis.mass_kg + fuel_mass;
 
@@ -1000,7 +1143,7 @@ static void lcc__tire_stiffness(const lcc_tire_desc_t *td, float fz, float tire_
   if(Cy_out) *Cy_out = Cy;
 }
 
-/* =============================== START Pacejka  =============================== {{{*/
+/* Pacejka */
 static float lcc__pacejka_magic(float x, float B, float C, float D, float E) {
   /* D*sin(C*atan(Bx - E(Bx - atan(Bx)))) */
   float Bx     = B * x;
@@ -1034,8 +1177,6 @@ static float lcc__pacejka_Fy_pure(float alpha, float mu, float Fz, float Ky) {
   /* negative to oppose lateral slip */
   return -lcc__pacejka_magic(alpha, B, C, D, E);
 }
-
-/* =============================== END Pacejka =============================== }}}*/
 
 /* slip relaxation filtering */
 static float lcc__relax_filt(float prev, float target, float Vrel, float Lrel, float dt) {
@@ -1239,7 +1380,7 @@ static float lcc__engine_torque_compute(lcc_car_t *car, float rpm, float throttl
   float pr = map_kpa / 100.0f;
   float tq = wot * load * pr - friction * (0.5f + 0.5f * (1.0f - load));
 
-  if(ed->fuel_cut_on_redline && rpm >= ed->redline_rpm) tq = fminf(tq, 0.0f);
+  if(rpm >= ed->redline_rpm) tq = fminf(tq, 0.0f);
   return tq;
 }
 
@@ -1841,7 +1982,7 @@ static lcc_result_t lcc__car_step(lcc_car_t *car, float dt_s) {
 
   /* engine speed dynamics */
   float eng_omega    = lcc__rpm_to_radps(car->engine_state.rpm);
-  float load_omega   = lcc__rpm_to_radps(fabsf(gear_ratio * shaft_out_rpm));
+  float load_omega   = lcc__rpm_to_radps(gear_ratio * shaft_out_rpm);
   float Ieng         = fmaxf(0.02f, car->desc.engine.inertia_kgm2);
   float T_net        = T_starter + tq_engine_comb - T_to_trans - T_fric_drag;
   float domega_free  = T_net / Ieng;
@@ -2010,8 +2151,6 @@ void lcc_engine_desc_init_defaults(lcc_engine_desc_t *desc) {
   desc->stall_rpm                     = 400.0f;
   desc->inertia_kgm2                  = 0.2f;
   desc->wastegate_pressure_kpa        = 110.0f;
-  desc->fuel_cut_on_redline           = 1;
-  desc->spark_cut_on_redline          = 0;
   desc->coolant_heat_capacity_j_per_k = 60000.0f;
   desc->oil_heat_capacity_j_per_k     = 40000.0f;
 
@@ -2070,9 +2209,9 @@ void lcc_ecu_desc_init_defaults(lcc_ecu_desc_t *desc) {
   lcc__pzero(desc);
 
   /* TODO: one of these is fucked up */
-  desc->abs_mode = LCC_ABS_OFF;
-  desc->tc_mode  = LCC_TC_OFF;
-  desc->esc_mode = LCC_ESC_OFF;
+  desc->abs_mode = LCC_ABS_ON;
+  desc->tc_mode  = LCC_TC_ON;
+  desc->esc_mode = LCC_ESC_ON;
 
   /* TODO: this only in automatic transmission? could be completely removed */
   desc->auto_clutch = 0;
@@ -2280,6 +2419,7 @@ lcc_car_t *lcc_car_create(const lcc_car_desc_t *desc) {
 
 void lcc_car_destroy(lcc_car_t *car) {
   if(!car) return;
+  lcc__free_owned_engine_maps(car);
   lcc__free(car, lcc__alloc_user);
 }
 
@@ -2304,6 +2444,22 @@ void lcc_car_get_environment(const lcc_car_t *car, lcc_environment_t *env_out) {
 
 lcc_result_t lcc_car_set_engine_map(lcc_car_t *car, const lcc_curve1d_t *wot_torque, const lcc_curve1d_t *friction) {
   if(!car) return LCC_ERR_INVALID_ARG;
+  /* if we previously generated maps, free them before overriding */
+  if(wot_torque) {
+    if(car->owned_wot_pts) {
+      lcc__free(car->owned_wot_pts, lcc__alloc_user);
+      car->owned_wot_pts   = NULL;
+      car->owned_wot_count = 0;
+    }
+  }
+  if(friction) {
+    if(car->owned_fric_pts) {
+      lcc__free(car->owned_fric_pts, lcc__alloc_user);
+      car->owned_fric_pts   = NULL;
+      car->owned_fric_count = 0;
+    }
+  }
+
   if(wot_torque) car->desc.engine.wot_torque_nm_vs_rpm = *wot_torque;
   if(friction) car->desc.engine.friction_torque_nm_vs_rpm = *friction;
   return LCC_OK;
@@ -2311,6 +2467,13 @@ lcc_result_t lcc_car_set_engine_map(lcc_car_t *car, const lcc_curve1d_t *wot_tor
 
 lcc_result_t lcc_car_set_boost_map(lcc_car_t *car, const lcc_map2d_t *boost) {
   if(!car || !boost) return LCC_ERR_INVALID_ARG;
+  /* free previously generated boost map if any */
+  if(car->owned_boost_pts) {
+    lcc__free(car->owned_boost_pts, lcc__alloc_user);
+    car->owned_boost_pts   = NULL;
+    car->owned_boost_count = 0;
+  }
+
   car->desc.engine.boost_pressure_kpa_vs_rpm_throttle = *boost;
   return LCC_OK;
 }
@@ -2357,29 +2520,6 @@ lcc_result_t lcc_car_set_arb_params(lcc_car_t *car, const lcc_arb_desc_t *arb) {
 lcc_result_t lcc_car_set_steering_params(lcc_car_t *car, const lcc_steering_desc_t *steer) {
   if(!car || !steer) return LCC_ERR_INVALID_ARG;
   car->desc.steering = *steer;
-  return LCC_OK;
-}
-
-/* powertrain controls */
-lcc_result_t lcc_car_engine_start(lcc_car_t *car) {
-  if(!car) return LCC_ERR_INVALID_ARG;
-  if(car->engine_state.running) return LCC_OK;
-  if(car->elec_state.battery_soc <= 0.05f) return LCC_ERR_BAD_STATE;
-  if(car->fuel_state.fuel_l <= 0.01f) return LCC_ERR_BAD_STATE;
-
-  /* request cranking; actual start event is emitted when it "catches" in step */
-  car->engine_state.cranking = 1;
-  car->engine_crank_timer_s  = 0.0f;
-  if(car->engine_state.rpm < 50.0f) car->engine_state.rpm = 50.0f; /* small nudge so starter torque isn't infinite */
-  return LCC_OK;
-}
-
-lcc_result_t lcc_car_engine_stop(lcc_car_t *car) {
-  if(!car) return LCC_ERR_INVALID_ARG;
-  if(!car->engine_state.running && !car->engine_state.cranking) return LCC_OK;
-  car->engine_state.running  = 0;
-  car->engine_state.cranking = 0;
-  lcc__emit_event(car, LCC_EVENT_ENGINE_STOP, 0, 0.0f);
   return LCC_OK;
 }
 
@@ -2453,7 +2593,7 @@ void lcc_car_set_esc(lcc_car_t *car, lcc_esc_mode_t mode) {
   car->desc.ecu.esc_mode = mode;
 }
 
-/* pose and velocity */
+/* pos and velocity */
 void lcc_car_set_pos(lcc_car_t *car, const float pos_world[2], float yaw_rad) {
   if(!car || !pos_world) return;
   car->car_state.pos_world[0] = pos_world[0];
@@ -2506,57 +2646,6 @@ lcc_result_t lcc_car_step(lcc_car_t *car, float dt_s) {
   return lcc__car_step(car, dt_s);
 }
 
-/* state getters */
-void lcc_car_get_car_state(const lcc_car_t *car, lcc_car_state_t *out) {
-  if(!car || !out) return;
-  *out = car->car_state;
-}
-
-void lcc_car_get_engine_state(const lcc_car_t *car, lcc_engine_state_t *out) {
-  if(!car || !out) return;
-  *out = car->engine_state;
-}
-
-void lcc_car_get_transmission_state(const lcc_car_t *car, lcc_transmission_state_t *out) {
-  if(!car || !out) return;
-  *out = car->trans_state;
-}
-
-void lcc_car_get_brake_state(const lcc_car_t *car, lcc_brake_state_t *out) {
-  if(!car || !out) return;
-  *out = car->brake_state;
-}
-
-void lcc_car_get_electrics_state(const lcc_car_t *car, lcc_electrics_state_t *out) {
-  if(!car || !out) return;
-  *out = car->elec_state;
-}
-
-void lcc_car_get_fuel_state(const lcc_car_t *car, lcc_fuel_state_t *out) {
-  if(!car || !out) return;
-  *out = car->fuel_state;
-}
-
-void lcc_car_get_cooling_state(const lcc_car_t *car, lcc_cooling_state_t *out) {
-  if(!car || !out) return;
-  *out = car->cool_state;
-}
-
-void lcc_car_get_wheel_state(const lcc_car_t *car, int wheel_index, lcc_wheel_state_t *out) {
-  if(!car || !out || wheel_index < 0 || wheel_index >= car->wheel_count) return;
-  *out = car->wheel_states[wheel_index];
-}
-
-void lcc_car_get_damage_state(const lcc_car_t *car, lcc_damage_state_t *out) {
-  if(!car || !out) return;
-  *out = car->damage_state;
-}
-
-void lcc_car_set_damage_state(lcc_car_t *car, const lcc_damage_state_t *in) {
-  if(!car || !in) return;
-  car->damage_state = *in;
-}
-
 /* units */
 float lcc_deg_to_rad(float deg) {
   return lcc__deg2rad(deg);
@@ -2573,12 +2662,155 @@ void lcc_car_set_event_callback(lcc_car_t *car, lcc_event_cb callback, void *use
   car->evt_user = user;
 }
 
+/* ============================== engine map generation ============================== {{{*/
+void lcc_engine_simple_spec_init_defaults(lcc_engine_simple_spec_t *spec) {
+  if(!spec) return;
+  lcc__pzero(spec);
+  spec->rated_power_kw   = 150.0f;
+  spec->rated_power_rpm  = 6000.0f;
+  spec->redline_rpm      = 6500.0f;
+  spec->idle_rpm         = 800.0f;
+  spec->stall_rpm        = 0.0f; /* use engine desc default if 0 */
+  spec->peak_torque_nm   = 0.0f; /* derive */
+  spec->peak_torque_rpm  = 0.0f; /* derive */
+  spec->forced_induction = LCC_FI_NONE;
+  spec->boost_target_kpa = 0.0f;
+}
+
+/* generate WOT torque and friction curves + throttle & boost maps, attach to car and own the memory */
+lcc_result_t lcc_car_generate_engine_from_simple_spec(lcc_car_t *car, const lcc_engine_simple_spec_t *spec) {
+  if(!car || !spec) return LCC_ERR_INVALID_ARG;
+  if(!(spec->rated_power_kw > 1.0f) || !(spec->redline_rpm > 1000.0f)) return LCC_ERR_INVALID_ARG;
+
+  const float rl         = spec->redline_rpm;
+  const float idle       = (spec->idle_rpm > 0.0f) ? spec->idle_rpm : 800.0f;
+  float       rpm_pwr    = (spec->rated_power_rpm > 0.0f) ? spec->rated_power_rpm : 0.0f;
+  float       tpeak_mult = 1.20f, rpm_tpeak = 0.45f * rl, rpm_power_def = 0.87f * rl;
+  lcc__engine_shape_params(spec->forced_induction, rl, &tpeak_mult, &rpm_tpeak, &rpm_power_def);
+  if(!(rpm_pwr > 0.0f)) rpm_pwr = rpm_power_def;
+  if(spec->peak_torque_rpm > 0.0f) rpm_tpeak = spec->peak_torque_rpm;
+  rpm_tpeak = lcc__clampf(rpm_tpeak, idle + 100.0f, rl - 500.0f);
+  rpm_pwr   = lcc__clampf(rpm_pwr, rpm_tpeak + 200.0f, rl - 200.0f);
+
+  float omega_pwr = lcc__rpm_to_radps(rpm_pwr);
+  float T_at_pwr  = (spec->rated_power_kw * 1000.0f) / fmaxf(1.0f, omega_pwr);
+  float T_peak    = (spec->peak_torque_nm > 0.0f) ? spec->peak_torque_nm : (tpeak_mult * T_at_pwr);
+
+  /* target torques at some key rpms (shape varies by FI) */
+  float T_idle = T_peak * ((spec->forced_induction == LCC_FI_TURBO || spec->forced_induction == LCC_FI_TWINCHARGED) ? 0.40f : (spec->forced_induction == LCC_FI_SUPERCHARGER ? 0.50f : 0.55f));
+  float T_pre  = T_peak * 0.95f;                                                       /* before peak */
+  float T_mid  = T_peak * ((spec->forced_induction == LCC_FI_NONE) ? 0.93f : 0.98f);   /* between Tpeak and Ppeak */
+  float T_pwr  = T_at_pwr;                                                             /* at power peak */
+  float T_92   = T_at_pwr * ((spec->forced_induction == LCC_FI_NONE) ? 0.85f : 0.90f); /* near redline */
+  float T_rl   = T_at_pwr * ((spec->forced_induction == LCC_FI_NONE) ? 0.70f : 0.80f); /* redline */
+
+  /* Build WOT torque points */
+  int                  nwot = LCC_ENG_GEN_WOT_POINTS;
+  lcc_curve1d_point_t *wot  = (lcc_curve1d_point_t *)lcc__alloc(sizeof(lcc_curve1d_point_t) * (size_t)nwot, lcc__alloc_user);
+  if(!wot) return LCC_ERR_OUT_OF_MEMORY;
+  float r0                         = idle;
+  float r1                         = lcc__lerp(idle, rl, 0.25f);
+  float r2                         = lcc__lerp(idle, rpm_tpeak, 0.75f);
+  float r3                         = rpm_tpeak;
+  float r4                         = lcc__lerp(rpm_tpeak, rpm_pwr, 0.5f);
+  float r5                         = rpm_pwr;
+  float r6                         = lcc__lerp(rpm_pwr, rl, 0.92f);
+  float r7                         = rl;
+  float r8                         = rl + 0.01f * rl; /* tiny overshoot to ensure clamp */
+  float rs[LCC_ENG_GEN_WOT_POINTS] = { r0, r1, r2, r3, r4, r5, r6, r7, r8 };
+  float ts[LCC_ENG_GEN_WOT_POINTS] = { T_idle, lcc__lerp(T_idle, T_pre, 0.6f), T_pre, T_peak, T_mid, T_pwr, T_92, T_rl, T_rl * 0.95f };
+  for(int i = 0; i < nwot; ++i) {
+    wot[i].x = rs[i];
+    wot[i].y = fmaxf(0.0f, ts[i]);
+  }
+
+  /* friction torque vs rpm: ~10% of rated power at P_peak, tapering to ~10 Nm at idle */
+  int                  nfr = LCC_ENG_GEN_FRICT_POINTS;
+  lcc_curve1d_point_t *frc = (lcc_curve1d_point_t *)lcc__alloc(sizeof(lcc_curve1d_point_t) * (size_t)nfr, lcc__alloc_user);
+  if(!frc) {
+    lcc__free(wot, lcc__alloc_user);
+    return LCC_ERR_OUT_OF_MEMORY;
+  }
+  float Pfrac                        = 0.10f;
+  float Tf_pwr                       = (spec->rated_power_kw * 1000.0f * Pfrac) / fmaxf(1.0f, omega_pwr);
+  float Tf_idle                      = 10.0f;
+  float Tf_rl                        = Tf_pwr * 1.10f;
+  float rF[LCC_ENG_GEN_FRICT_POINTS] = { idle, lcc__lerp(idle, rpm_tpeak, 0.5f), rpm_pwr, lcc__lerp(rpm_pwr, rl, 0.5f), rl, rl + 0.01f * rl };
+  float tF[LCC_ENG_GEN_FRICT_POINTS] = { Tf_idle, lcc__lerp(Tf_idle, Tf_pwr, 0.7f), Tf_pwr, lcc__lerp(Tf_pwr, Tf_rl, 0.7f), Tf_rl, Tf_rl * 1.05f };
+  for(int i = 0; i < nfr; ++i) {
+    frc[i].x = rF[i];
+    frc[i].y = fmaxf(0.0f, tF[i]);
+  }
+
+  /* slight shaping based on FI */
+  int                  nth = 5;
+  lcc_curve1d_point_t *thr = (lcc_curve1d_point_t *)lcc__alloc(sizeof(lcc_curve1d_point_t) * (size_t)nth, lcc__alloc_user);
+  if(!thr) {
+    lcc__free(wot, lcc__alloc_user);
+    lcc__free(frc, lcc__alloc_user);
+    return LCC_ERR_OUT_OF_MEMORY;
+  }
+  float gamma = (spec->forced_induction == LCC_FI_TURBO || spec->forced_induction == LCC_FI_TWINCHARGED) ? 1.10f : 0.90f;
+  lcc__make_throttle_map_points(gamma, thr, &nth);
+
+  /* Boost map if FI */
+  int                nboost       = 0;
+  lcc_map2d_point_t *boost_pts    = NULL;
+  float              boost_target = lcc__kpa_target_from_fi(spec->forced_induction, spec->boost_target_kpa);
+  if(spec->forced_induction != LCC_FI_NONE && boost_target > 1.0f) {
+    nboost    = 7 * 5;
+    boost_pts = (lcc_map2d_point_t *)lcc__alloc(sizeof(lcc_map2d_point_t) * (size_t)nboost, lcc__alloc_user);
+    if(!boost_pts) {
+      lcc__free(wot, lcc__alloc_user);
+      lcc__free(frc, lcc__alloc_user);
+      lcc__free(thr, lcc__alloc_user);
+      return LCC_ERR_OUT_OF_MEMORY;
+    }
+    lcc__make_boost_map_points(spec->forced_induction, rl, boost_target, boost_pts, &nboost);
+  }
+
+  /* free any existing generated maps, then attach new */
+  lcc__free_owned_engine_maps(car);
+  car->desc.engine.wot_torque_nm_vs_rpm.points      = wot;
+  car->desc.engine.wot_torque_nm_vs_rpm.count       = LCC_ENG_GEN_WOT_POINTS;
+  car->desc.engine.friction_torque_nm_vs_rpm.points = frc;
+  car->desc.engine.friction_torque_nm_vs_rpm.count  = LCC_ENG_GEN_FRICT_POINTS;
+  car->desc.engine.throttle_map.points              = thr;
+  car->desc.engine.throttle_map.count               = 5;
+  if(boost_pts && nboost > 0) {
+    car->desc.engine.boost_pressure_kpa_vs_rpm_throttle.points = boost_pts;
+    car->desc.engine.boost_pressure_kpa_vs_rpm_throttle.count  = nboost;
+    car->desc.engine.wastegate_pressure_kpa                    = boost_target;
+  } else {
+    car->desc.engine.boost_pressure_kpa_vs_rpm_throttle.points = NULL;
+    car->desc.engine.boost_pressure_kpa_vs_rpm_throttle.count  = 0;
+  }
+  /* engine basic params */
+  car->desc.engine.idle_rpm = idle;
+  if(spec->stall_rpm > 0.0f) car->desc.engine.stall_rpm = spec->stall_rpm;
+  car->desc.engine.redline_rpm      = rl;
+  car->desc.engine.forced_induction = spec->forced_induction;
+
+  /* record ownership so we can free on destroy or replace */
+  car->owned_wot_pts     = wot;
+  car->owned_wot_count   = LCC_ENG_GEN_WOT_POINTS;
+  car->owned_fric_pts    = frc;
+  car->owned_fric_count  = LCC_ENG_GEN_FRICT_POINTS;
+  car->owned_thr_pts     = thr;
+  car->owned_thr_count   = 5;
+  car->owned_boost_pts   = boost_pts;
+  car->owned_boost_count = nboost;
+
+  return LCC_OK;
+}
+
+/*}}}*/
+
 /* utilities */
 void lcc_car_get_local_bounds(const lcc_car_t *car, float min_local_out[2], float max_local_out[2]) {
   if(!car) return;
   float half_w = 0.5f * fmaxf(0.1f, car->desc.chassis.width_m);
   float half_l = 0.5f * fmaxf(0.1f, car->desc.chassis.length_m);
-
   if(min_local_out) {
     min_local_out[0] = -half_l;
     min_local_out[1] = -half_w;
@@ -2589,13 +2821,22 @@ void lcc_car_get_local_bounds(const lcc_car_t *car, float min_local_out[2], floa
   }
 }
 
-int lcc_car_get_wheel_local_positions(const lcc_car_t *car, float out_positions[][2], int max_wheels) {
+/* TODO: test this function */
+int lcc_car_get_wheel_global_positions(const lcc_car_t *car, float out_positions[][2], int max_wheels) {
   if(!car || !out_positions || max_wheels <= 0) return 0;
-  for(int i = 0; i < car->wheel_count; ++i) {
-    out_positions[i][0] = car->desc.wheels[i].position_local[0];
-    out_positions[i][1] = car->desc.wheels[i].position_local[1];
+  int count = car->wheel_count;
+  if(count > max_wheels) count = max_wheels;
+  float cos_r = cosf(car->car_state.yaw_rad);
+  float sin_r = sinf(car->car_state.yaw_rad);
+  for(int i = 0; i < count; ++i) {
+    float lx            = car->desc.wheels[i].position_local[0];
+    float ly            = car->desc.wheels[i].position_local[1];
+    float gx            = cos_r * lx - sin_r * ly;
+    float gy            = sin_r * lx + cos_r * ly;
+    out_positions[i][0] = car->car_state.pos_world[0] + gx;
+    out_positions[i][1] = car->car_state.pos_world[1] + gy;
   }
-  return car->wheel_count;
+  return count;
 }
 
 /*}}}*/
