@@ -141,7 +141,7 @@ typedef enum lcc_forced_induction_e { LCC_FI_NONE = 0, LCC_FI_TURBO = 1, LCC_FI_
 typedef enum lcc_diff_type_e { LCC_DIFF_OPEN = 0, LCC_DIFF_LOCKED = 1, LCC_DIFF_LSD_CLUTCH = 2, LCC_DIFF_TORSEN = 3, LCC_DIFF_ACTIVE = 4 } lcc_diff_type_t;
 
 /* events and callbacks */
-typedef enum lcc_event_type_e { LCC_EVENT_ENGINE_START = 0, LCC_EVENT_ENGINE_STOP = 1, LCC_EVENT_GEAR_CHANGE = 2, LCC_EVENT_ENGINE_STALL = 3, LCC_EVENT_ABS_ACTIVE = 4, LCC_EVENT_TC_ACTIVE = 5, LCC_EVENT_ESC_ACTIVE = 6, LCC_EVENT_OVERHEAT = 7, LCC_EVENT_FUEL_STARVATION = 8 } lcc_event_type_t;
+typedef enum lcc_event_type_e { LCC_EVENT_ENGINE_START = 0, LCC_EVENT_ENGINE_STOP = 1, LCC_EVENT_GEAR_CHANGE = 2, LCC_EVENT_ENGINE_STALL = 3, LCC_EVENT_OVERHEAT = 4, LCC_EVENT_FUEL_STARVATION = 5} lcc_event_type_t;
 
 /* driver aids */
 typedef enum lcc_abs_mode_e { LCC_ABS_OFF = 0, LCC_ABS_ON = 1 } lcc_abs_mode_t;
@@ -224,7 +224,6 @@ typedef struct {
   float stall_rpm;
   float inertia_kgm2;
 
-  /* TODO: dynamically generate these */
   lcc_curve1d_t wot_torque_nm_vs_rpm;
   lcc_curve1d_t friction_torque_nm_vs_rpm;
   lcc_curve1d_t throttle_map;
@@ -517,9 +516,6 @@ typedef struct {
   void        *evt_user;
 
   double last_overheat_evt_time;
-  double last_abs_evt_time;
-  double last_tc_evt_time;
-  double last_esc_evt_time;
 } lcc_car_t;
 
 /*}}}*/
@@ -615,7 +611,6 @@ LCC_API float lcc_rad_to_deg(float rad);
 #endif
 #endif /* LIBCCAR_H */
 
-#define LCC_IMPLEMENTATION
 #ifdef LCC_IMPLEMENTATION
 
 #include <math.h>
@@ -1054,9 +1049,6 @@ static void lcc__init_runtime(lcc_car_t *car) {
   }
 
   car->last_overheat_evt_time = -1e9;
-  car->last_abs_evt_time      = -1e9;
-  car->last_tc_evt_time       = -1e9;
-  car->last_esc_evt_time      = -1e9;
 
   lcc__compute_static_loads(car);
 
@@ -1621,6 +1613,12 @@ static lcc_result_t lcc__car_step(lcc_car_t *car, float dt_s) {
   float                    T_starter      = 0.0f; /* starter torque */
   float                    T_fric_drag    = 0.0f; /* passive friction when not combusting */
 
+  /* turn off engine if ignition isn't on */
+  if(!car->controls.ignition_switch && car->engine_state.running) {
+    car->engine_state.running = 0;
+    lcc__emit_event(car, LCC_EVENT_ENGINE_STOP, 0, 0.0f);
+  }
+
   /* cranking request: either from API (engine_state.cranking) or driver controls */
   int has_fuel   = (car->fuel_state.fuel_l > 1e-3f);
   int want_crank = (!car->engine_state.running) && (car->engine_state.cranking || (car->controls.ignition_switch && car->controls.starter));
@@ -1631,7 +1629,7 @@ static lcc_result_t lcc__car_step(lcc_car_t *car, float dt_s) {
   }
 
   /* running -> produce combustion torque with idle control & TC cut */
-  if(car->engine_state.running && car->controls.ignition_switch) {
+  if(car->engine_state.running) {
     float throttle_eff = lcc__saturate(car->controls.throttle);
 
     /* idle control */
@@ -1665,7 +1663,7 @@ static lcc_result_t lcc__car_step(lcc_car_t *car, float dt_s) {
   }
 
   /* passive friction/pumping drag when not combusting */
-  if(!(car->engine_state.running && car->controls.ignition_switch)) {
+  if(!car->engine_state.running) {
     float fr = lcc__curve1d_eval(&ed->friction_torque_nm_vs_rpm, car->engine_state.rpm);
     if(fr > 0.0f) T_fric_drag = fr;
   }
@@ -1927,25 +1925,6 @@ static lcc_result_t lcc__car_step(lcc_car_t *car, float dt_s) {
     }
   }
 
-  /* ABS event */
-  int any_abs = 0;
-  for(int i = 0; i < car->wheel_count; ++i)
-    if(car->abs_mod[i] < 0.999f) {
-      any_abs = 1;
-      break;
-    }
-  if(car->desc.ecu.abs_mode == LCC_ABS_ON && any_abs && (car->car_state.time_s - car->last_abs_evt_time) > 0.2) {
-    car->last_abs_evt_time = car->car_state.time_s;
-    lcc__emit_event(car, LCC_EVENT_ABS_ACTIVE, 0, 0.0f);
-  }
-
-  /* TC update and event */
-  lcc__tc_update(car, max_pos_slip, dt_s);
-  if(car->desc.ecu.tc_mode == LCC_TC_ON && car->tc_cut > 0.01f && (car->car_state.time_s - car->last_tc_evt_time) > 0.2) {
-    car->last_tc_evt_time = car->car_state.time_s;
-    lcc__emit_event(car, LCC_EVENT_TC_ACTIVE, 0, car->tc_cut);
-  }
-
   /* aero -> body */
   float drag_body[2];
   lcc__v2_rot(drag_body, drag_world, -car->car_state.yaw_rad);
@@ -2108,18 +2087,6 @@ static lcc_result_t lcc__car_step(lcc_car_t *car, float dt_s) {
 
   /* thermal updates */
   lcc__thermal_update(car, power_kw, dt_s);
-
-  /* ESC event */
-  int any_esc = 0;
-  for(int i = 0; i < car->wheel_count; ++i)
-    if(car->esc_extra_brake[i] > 1.0f) {
-      any_esc = 1;
-      break;
-    }
-  if(car->desc.ecu.esc_mode == LCC_ESC_ON && any_esc && (car->car_state.time_s - car->last_esc_evt_time) > 0.3) {
-    car->last_esc_evt_time = car->car_state.time_s;
-    lcc__emit_event(car, LCC_EVENT_ESC_ACTIVE, 0, 0.0f);
-  }
 
   return LCC_OK;
 }
