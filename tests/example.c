@@ -21,7 +21,7 @@ static const char *evt_name(lcc_event_type_t t) {
 static void on_event(const lcc_event_t *evt, void *user) {
   (void)user;
   printf("[%.3f] EVENT: %s", (double)evt->time_s, evt_name(evt->type));
-  if(evt->type == LCC_EVENT_GEAR_CHANGE) printf(" -> gear=%d", evt->data_i32);
+  if(evt->type == LCC_EVENT_GEAR_CHANGE) printf(" -> gear=%d", evt->data_i32 - 1);
   else if(evt->type == LCC_EVENT_OVERHEAT)
     printf(" -> coolant=%.1f C", evt->data_f32);
   printf("\n");

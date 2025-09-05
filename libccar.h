@@ -2489,7 +2489,7 @@ lcc_result_t lcc_car_request_gear(lcc_car_t *car, int gear_index) {
 lcc_result_t lcc_car_shift_up(lcc_car_t *car) {
   if(!car) return LCC_ERR_INVALID_ARG;
   int next = car->trans_state.gear_index + 1;
-  if(next >= car->desc.transmission.gear_count) next = car->desc.transmission.gear_count - 1;
+  if(next >= car->desc.transmission.gear_count) return LCC_ERR_BOUNDS;
   return lcc_car_request_gear(car, next);
 }
 
@@ -2497,7 +2497,7 @@ lcc_result_t lcc_car_shift_down(lcc_car_t *car) {
   if(!car) return LCC_ERR_INVALID_ARG;
   int next     = car->trans_state.gear_index - 1;
   int min_gear = car->desc.transmission.type != LCC_TRANS_MANUAL ? 2 : 0;
-  if(next < min_gear) next = min_gear;
+  if(next < min_gear) return LCC_ERR_BOUNDS;
   return lcc_car_request_gear(car, next);
 }
 
