@@ -1412,20 +1412,6 @@ static float lcc__abs_apply(lcc_car_t *car, int i, float T_brake_cmd, float slip
   return T_brake_cmd * mod;
 }
 
-/* tc engine cut update from driven wheel slip */
-static void lcc__tc_update(lcc_car_t *car, float max_pos_slip, float dt) {
-  if(car->desc.ecu.tc_mode == LCC_TC_OFF) {
-    car->tc_cut = 0.0f;
-    return;
-  }
-  float s_target = 0.12f;
-  float cut      = car->tc_cut;
-  if(max_pos_slip > s_target) cut += 6.0f * dt * (max_pos_slip - s_target);
-  else
-    cut -= 3.0f * dt * (s_target - max_pos_slip);
-  car->tc_cut = lcc__clampf(cut, 0.0f, 0.7f); /* up to 70% cut */
-}
-
 /* esc yaw control -> additional brake torque distribution */
 static void lcc__esc_update(lcc_car_t *car) {
   for(int i = 0; i < car->wheel_count; ++i) car->esc_extra_brake[i] = 0.0f;
