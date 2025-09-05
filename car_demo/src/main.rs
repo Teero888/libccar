@@ -312,7 +312,7 @@ struct CarCfg {
     track_rear: f32,
     cg_height: f32,
     final_drive: f32,
-    layout: u32, // LCC_LAYOUT_FWD/RWD/AWD/4X4
+    layout: i32, // LCC_LAYOUT_FWD/RWD/AWD/4X4
     // aero
     cd: f32,
     frontal_area: f32,
@@ -360,7 +360,7 @@ impl CarConfig {
             track_rear: desc.chassis.track_rear_m,
             cg_height: desc.chassis.cg_height_m,
             final_drive: desc.transmission.final_drive_ratio,
-            layout: desc.driveline.layout as u32,
+            layout: desc.driveline.layout as i32,
             cd: desc.aero.drag_coefficient,
             frontal_area: desc.aero.frontal_area_m2,
             cl_front: desc.aero.lift_coefficient_front,
@@ -1216,25 +1216,25 @@ impl App {
                         ui.label("Layout");
                         egui::ComboBox::from_id_salt("layout")
                             .selected_text(match self.config.car.layout {
-                                x if x == LCC_LAYOUT_FWD as u32 => "FWD",
-                                x if x == LCC_LAYOUT_RWD as u32 => "RWD",
-                                x if x == LCC_LAYOUT_AWD as u32 => "AWD",
+                                x if x == LCC_LAYOUT_FWD as i32 => "FWD",
+                                x if x == LCC_LAYOUT_RWD as i32 => "RWD",
+                                x if x == LCC_LAYOUT_AWD as i32 => "AWD",
                                 _ => "FWD",
                             })
                             .show_ui(ui, |ui| {
                                 ui.selectable_value(
                                     &mut self.config.car.layout,
-                                    LCC_LAYOUT_FWD as u32,
+                                    LCC_LAYOUT_FWD as i32,
                                     "FWD",
                                 );
                                 ui.selectable_value(
                                     &mut self.config.car.layout,
-                                    LCC_LAYOUT_RWD as u32,
+                                    LCC_LAYOUT_RWD as i32,
                                     "RWD",
                                 );
                                 ui.selectable_value(
                                     &mut self.config.car.layout,
-                                    LCC_LAYOUT_AWD as u32,
+                                    LCC_LAYOUT_AWD as i32,
                                     "AWD",
                                 );
                             });
