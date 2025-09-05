@@ -1127,6 +1127,15 @@ impl App {
                 self.desc.chassis.track_front_m = self.config.car.track_front;
                 self.desc.chassis.track_rear_m = self.config.car.track_rear;
                 self.desc.chassis.cg_height_m = self.config.car.cg_height;
+                // fuck bindgen https://github.com/rust-lang/rust-bindgen/issues/1966
+                #[cfg(target_os = "windows")]
+                {
+                    self.desc.driveline.layout = self.config.car.layout as i32;
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    self.desc.driveline.layout = self.config.car.layout as u32;
+                }
                 self.desc.driveline.layout = self.config.car.layout as u32;
                 self.desc.transmission.final_drive_ratio = self.config.car.final_drive;
 
