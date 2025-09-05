@@ -1136,7 +1136,6 @@ impl App {
                 {
                     self.desc.driveline.layout = self.config.car.layout as u32;
                 }
-                self.desc.driveline.layout = self.config.car.layout as u32;
                 self.desc.transmission.final_drive_ratio = self.config.car.final_drive;
 
                 self.desc.aero.drag_coefficient = self.config.car.cd;
