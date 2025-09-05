@@ -1,6 +1,8 @@
 car_demo/target
 car_demo/Cargo.lock
 car_demo/lib/libccar.so
+target
+Cargo.lock
 *.csv
 perf.*
 *.out
