@@ -1130,7 +1130,7 @@ impl App {
                 // fuck bindgen https://github.com/rust-lang/rust-bindgen/issues/1966
                 #[cfg(target_os = "windows")]
                 {
-                    self.desc.driveline.layout = self.config.car.layout as i32;
+                    self.desc.driveline.layout = self.config.car.layout;
                 }
                 #[cfg(not(target_os = "windows"))]
                 {

@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "car_demo",
+]
+resolver = "2"
+default-members = ["car_demo"]
