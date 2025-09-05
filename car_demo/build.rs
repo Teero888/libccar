@@ -1,7 +1,16 @@
-use std::{env, fs, path::PathBuf};
+use std::{env, path::PathBuf};
 
-fn main() {
-    println!("cargo:rerun-if-changed=../libccar.h");
+// build the c library from source
+#[cfg(not(feature = "link-system"))]
+fn build_or_link() {
+    let mut build = cc::Build::new();
+    build.file("../build_libccar.c").include("..");
+    build.compile("ccar");
+}
+
+// link the pre-compiled library
+#[cfg(feature = "link-system")]
+fn build_or_link() {
     println!("cargo:rerun-if-env-changed=LIBCCAR_LIB_DIR");
     println!("cargo:rerun-if-env-changed=LIBCCAR_LINK_NAME");
 
@@ -39,6 +48,12 @@ fn main() {
         println!("cargo:rustc-link-search=native={}", abs.display());
         println!("cargo:rustc-link-lib=dylib=ccar");
     }
+}
+
+fn main() {
+    println!("cargo:rerun-if-changed=../libccar.h");
+
+    build_or_link();
 
     let bindings = bindgen::Builder::default()
         .header("../libccar.h")
