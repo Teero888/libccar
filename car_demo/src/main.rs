@@ -1967,6 +1967,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "libccar Frontend",
         native_options,
-        Box::new(|_cc| Ok(Box::new(unsafe { App::new(ViewPreset::Sports) }))),
+        Box::new(|_cc| Ok(Box::new(unsafe { App::new(ViewPreset::Hypercar) }))),
     )
 }

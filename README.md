@@ -1,6 +1,6 @@
 # libccar: A 2D Top-Down Car Simulation Library
 
-libccar is a lightweight, semi-realistic 2D top-down car simulation library provided as a single C99 header. It models an engine, transmission, clutch, differentials (open/locked/LSD/torsen/active), tires (Pacejka-style), aero, electrical system (battery/alternator/starter), cooling, fuel, and basic driver aids (ABS/TC/ESC). It’s aimed at fast prototyping and experimentation in games and simulators.
+libccar is a lightweight, semi-realistic 2D top-down car simulation library provided as a single C99 header. It models an engine, transmission, clutch, differentials (open/locked/LSD/torsen/active), tires (Pacejka-style), aero, electrical system (battery/alternator/starter), cooling, fuel, and basic driver aids (ABS/TC/ESC). It's aimed at fast prototyping and experimentation in games and simulators.
 
 - Space: 2D plane (+x forward, +y right)
 - Rotation: right-handed (clockwise positive)
@@ -68,27 +68,17 @@ clang -std=c99 main.c -lm
 
 ### Shared Library
 
-Use the provided build_libccar.c (contains #define LCC_IMPLEMENTATION):
+Use the provided build_libccar.c (defines LCC_IMPLEMENTATION):
 
 Linux:
 ```
 clang -O2 -std=c99 -fPIC -shared build_libccar.c -o libccar.so -lm
 ```
 
-macOS:
-```
-clang -O2 -std=c99 -dynamiclib build_libccar.c -o libccar.dylib -lm
-```
-
-Windows (MSVC):
-```
-cl /O2 /LD build_libccar.c /Fe:ccar.dll
-```
-
 Then link your app against the produced library and include libccar.h.
 
 ## Quick Start
-see [example.c](https://github.com/Teero888/libccar/blob/master/tests/example.c) for a minimal example showing defaults, create, step, controls, and reading state;
+See [example.c](https://github.com/Teero888/libccar/blob/master/tests/example.c) for a minimal example showing defaults, create, step, controls, and reading state.
 
 Build:
 ```
@@ -141,7 +131,7 @@ clang -O2 -std=c99 example.c -lm -o example
 
 | Function | Signature | Notes |
 |---|---|---|
-| `lcc_car_step` | `lcc_result_t lcc_car_step(lcc_car_t* car, float dt_s)` | Step simulation. `dt_s` > 0 and ≤ 0.1. |
+| `lcc_car_step` | `lcc_result_t lcc_car_step(lcc_car_t* car, float dt_s)` | Step simulation.  0.0 < `dt_s` <= 0.1 |
 | `lcc_car_set_controls` | `void lcc_car_set_controls(lcc_car_t* car, const lcc_controls_t* controls)` | Apply controls for next step. |
 | `lcc_car_get_controls` | `void lcc_car_get_controls(const lcc_car_t* car, lcc_controls_t* controls_out)` | Read current controls. |
 | `lcc_car_set_environment` | `void lcc_car_set_environment(lcc_car_t* car, const lcc_environment_t* env)` | Set environment state. |
@@ -167,8 +157,8 @@ Controls struct (`lcc_controls_t`)
 | `lcc_car_set_boost_map` | `lcc_result_t lcc_car_set_boost_map(lcc_car_t* car, const lcc_map2d_t* boost)` | Set boost map for forced induction. |
 | `lcc_car_set_gear_ratios` | `lcc_result_t lcc_car_set_gear_ratios(lcc_car_t* car, const float* gear_ratios, int gear_count, float final_drive)` | Update gearbox ratios and final drive. |
 | `lcc_car_set_diff_params` | `lcc_result_t lcc_car_set_diff_params(lcc_car_t* car, lcc_diff_type_t front, lcc_diff_type_t rear, float preload_nm, float bias_ratio)` | Configure front/rear diffs; bias used for LSD/Torsen. |
-| `lcc_car_set_tire_params` | `lcc_result_t lcc_car_set_tire_params(lcc_car_t* car, int wheel_index, const lcc_tire_desc_t* tire)` | Update a tire’s parameters. |
-| `lcc_car_set_brake_params` | `lcc_result_t lcc_car_set_brake_params(lcc_car_t* car, int wheel_index, const lcc_brake_desc_t* brake)` | Update a brake’s parameters. |
+| `lcc_car_set_tire_params` | `lcc_result_t lcc_car_set_tire_params(lcc_car_t* car, int wheel_index, const lcc_tire_desc_t* tire)` | Update a tire's parameters. |
+| `lcc_car_set_brake_params` | `lcc_result_t lcc_car_set_brake_params(lcc_car_t* car, int wheel_index, const lcc_brake_desc_t* brake)` | Update a brake's parameters. |
 | `lcc_car_set_arb_params` | `lcc_result_t lcc_car_set_arb_params(lcc_car_t* car, const lcc_arb_desc_t* arb)` | Update anti-roll bar parameters. |
 | `lcc_car_set_steering_params` | `lcc_result_t lcc_car_set_steering_params(lcc_car_t* car, const lcc_steering_desc_t* steer)` | Update steering parameters. |
 
@@ -258,10 +248,10 @@ Use this to auto-generate WOT torque, friction, throttle, and (if FI) boost maps
 - Speed: m/s internally; use `lcc_car_get_speed_kmh` for km/h
 - Forces: Newtons (N)
 - Torques: Newton-meters (Nm)
-- Time step: use 1/100 s or smaller (e.g., 1/120). lcc_car_step rejects dt_s > 0.1
+- Time step: use 1/100 s or smaller (e.g. 1/120). lcc_car_step rejects dt_s > 0.1
 - Coordinate system: body +x forward, +y right; world axes same; yaw is CW-positive
 
-Tip: You can override some tuning via preprocessor defines (Pacejka shape/curvature, battery/alt constants, etc.) before including libccar.h.
+You can override some tuning via preprocessor defines (Pacejka shape/curvature, battery/alt constants, etc.) before including libccar.h if you want.
 
 ## Optional Rust GUI Demo
 
@@ -271,5 +261,3 @@ The car_demo/ directory contains an optional Rust GUI visualizer using egui, lin
 cd car_demo
 cargo run --release
 ```
-
-Clang is typically required for bindgen on first build.
