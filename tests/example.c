@@ -4,7 +4,7 @@
 #include <stdio.h>
 
 #define LCC_IMPLEMENTATION
-#include "libccar.h"
+#include "../libccar.h"
 
 static const char *evt_name(lcc_event_type_t t) {
   switch(t) {
@@ -41,7 +41,7 @@ static void print_status(const lcc_car_t *car, const lcc_controls_t *ctrl) {
     gear_str = buf;
   }
 
-  float speed_kmh = cs->speed_mps * 3.6f;
+  float speed_kmh = lcc_car_get_speed_kmh(car);
   printf("[%.2f] v=%.1fkm/h  gear=%s  rpm=%.0f  thr=%.0f%% brake=%.0f%%  Vbus=%.2fV  Ialt=%.1fA  Ibatt=%.1fA  Coolant=%.1fC\n", (double)cs->time_s, speed_kmh, gear_str, car->engine_state.rpm, ctrl->throttle * 100.0f, ctrl->brake * 100.0f, car->elec_state.bus_voltage_v, car->elec_state.alt_current_a, car->elec_state.batt_current_a, car->cool_state.coolant_temp_c);
 }
 

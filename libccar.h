@@ -596,6 +596,7 @@ LCC_API void lcc_car_get_velocity(const lcc_car_t *car, float vel_world_out[2], 
 /* utilities */
 LCC_API void lcc_car_get_local_bounds(const lcc_car_t *car, float min_local_out[2], float max_local_out[2]);
 LCC_API int  lcc_car_get_wheel_global_positions(const lcc_car_t *car, float out_positions[][2], int max_wheels);
+float lcc_car_get_speed_kmh(const lcc_car_t *car);
 
 /* event subscription */
 LCC_API void lcc_car_set_event_callback(lcc_car_t *car, lcc_event_cb callback, void *user);
@@ -2774,6 +2775,11 @@ lcc_result_t lcc_car_generate_engine_from_simple_spec(lcc_car_t *car, const lcc_
 /*}}}*/
 
 /* utilities */
+
+float lcc_car_get_speed_kmh(const lcc_car_t *car) {
+  return car->car_state.speed_mps * 3.6f;
+}
+
 void lcc_car_get_local_bounds(const lcc_car_t *car, float min_local_out[2], float max_local_out[2]) {
   if(!car) return;
   float half_w = 0.5f * fmaxf(0.1f, car->desc.chassis.width_m);
