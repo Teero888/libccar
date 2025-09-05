@@ -1,16 +1,10 @@
+/* example.c - minimal demo for libccar */
+
+#include <math.h>
 #include <stdio.h>
-#include <time.h>
-#define LIBCCAR_IMPLEMENTATION
+
+#define LCC_IMPLEMENTATION
 #include "../libccar.h"
-
-clock_t timer_start() {
-  return clock();
-}
-
-double timer_end(clock_t start_time) {
-  clock_t end_time = clock();
-  return (double)(end_time - start_time) / CLOCKS_PER_SEC;
-}
 
 static const char *evt_name(lcc_event_type_t t) {
   switch(t) {
@@ -47,25 +41,28 @@ static void print_status(const lcc_car_t *car, const lcc_controls_t *ctrl) {
     gear_str = buf;
   }
 
-  float speed_kmh = cs->speed_mps * 3.6f;
+  float speed_kmh = lcc_car_get_speed_kmh(car);
   printf("[%.2f] v=%.1fkm/h  gear=%s  rpm=%.0f  thr=%.0f%% brake=%.0f%%  Vbus=%.2fV  Ialt=%.1fA  Ibatt=%.1fA  Coolant=%.1fC\n", (double)cs->time_s, speed_kmh, gear_str, car->engine_state.rpm, ctrl->throttle * 100.0f, ctrl->brake * 100.0f, car->elec_state.bus_voltage_v, car->elec_state.alt_current_a, car->elec_state.batt_current_a, car->cool_state.coolant_temp_c);
 }
 
 int main(void) {
   printf("libccar version: %s\n", lcc_version_string());
 
+  /* set up a car from defaults */
   lcc_car_desc_t desc;
   lcc_car_desc_init_defaults(&desc);
 
-  desc.transmission.type = LCC_TRANS_MANUAL; 
-  desc.ecu.auto_clutch   = 1;  
+  /* tweak some descriptor bits (optional) */
+  desc.transmission.type = LCC_TRANS_MANUAL; /* keep manual; we will shift ourselves */
+  desc.ecu.auto_clutch   = 1;                /* auto clutch during shifts for simplicity */
   desc.ecu.abs_mode      = LCC_ABS_ON;
   desc.ecu.tc_mode       = LCC_TC_ON;
   desc.ecu.esc_mode      = LCC_ESC_ON;
 
+  /* slight breeze headwind and reasonable ambient */
   desc.environment.ambient_temp_c = 22.0f;
   desc.environment.air_density    = 1.20f;
-  desc.environment.wind_world[0]  = -2.0f;
+  desc.environment.wind_world[0]  = -2.0f; /* headwind */
   desc.environment.wind_world[1]  = 0.0f;
 
   /* create car */
@@ -75,8 +72,10 @@ int main(void) {
     return 1;
   }
 
+  /* subscribe to events */
   lcc_car_set_event_callback(car, on_event, NULL);
 
+  /* optionally auto-generate a more exciting engine from typical datasheet values */
   {
     lcc_engine_simple_spec_t spec;
     lcc_engine_simple_spec_init_defaults(&spec);
@@ -126,17 +125,63 @@ int main(void) {
     }
   }
 
-  ctl.throttle  = 1.0f;
-  lcc_car_shift_up(car);
-  clock_t clock = timer_start();
+  /* select 1st gear (0=R, 1=N, 2=1st) */
+  lcc_car_request_gear(car, 2);
 
-  for(int i = 0; i < 1e6; ++i) {
-    lcc_car_set_controls(car, &ctl);
-    lcc_car_step(car, 1.0f / 240.0f);
+  /* drive scenario:
+     - 0..10 s: accelerate with throttle ramp, shift up near redline
+     - 4..8 s: turn headlights on to show electrical behavior
+     - 12..15 s: full brakes (ABS demo)
+  */
+  {
+    float  dt         = 1.0f / 240.0f;
+    double next_print = car->car_state.time_s;
+    double t_final    = car->car_state.time_s + 16.0;
+
+    while(car->car_state.time_s < t_final) {
+      double t   = car->car_state.time_s;
+      float  rpm = car->engine_state.rpm;
+
+      /* headlights toggle for fun */
+      if(t > 4.0 && t < 8.0) car->elec_state.consumers_headlights = 1;
+      else
+        car->elec_state.consumers_headlights = 0;
+
+      /* control phases */
+      if(t < 10.0) {
+        /* accelerate */
+        float ramp   = (float)fmin(1.0, (t) / 1.2); /* reach full throttle in ~1.2s */
+        ctl.throttle = ramp;
+        ctl.brake    = 0.0f;
+        ctl.steer    = 0.0f;
+
+        /* shift up near 6400 rpm if not already shifting */
+        if(!car->trans_state.shifting && rpm > 6400.0f) lcc_car_shift_up(car);
+      } else if(t < 12.0) {
+        /* cruise a bit */
+        ctl.throttle = 0.25f;
+        ctl.brake    = 0.0f;
+        ctl.steer    = 0.0f;
+      } else if(t < 15.0) {
+        /* hard braking */
+        ctl.throttle = 0.0f;
+        ctl.brake    = 1.0f;
+        ctl.steer    = 0.0f;
+      } else {
+        /* roll to a stop */
+        ctl.throttle = 0.0f;
+        ctl.brake    = 0.2f;
+      }
+
+      lcc_car_set_controls(car, &ctl);
+      lcc_car_step(car, dt);
+
+      if((double)car->car_state.time_s >= next_print) {
+        print_status(car, &ctl);
+        next_print += 0.10; /* 10 Hz status */
+      }
+    }
   }
-  double time = timer_end(clock);
-  printf("Took %f for 1e6 ticks. %f TPS\n", time, 1e6 / time);
-  printf("Speed: %.1f km/h, RPM: %.0f\n", lcc_car_get_speed_kmh(car), car->engine_state.rpm);
 
   lcc_car_destroy(car);
   return 0;

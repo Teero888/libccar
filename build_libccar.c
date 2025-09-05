@@ -1,7 +1,2 @@
-#define LIBCCAR_IMPLEMENTATION
-
-#ifdef _WIN32
-#define LIBCCAR_DEF __declspec(dllexport)
-#endif
-
+#define LCC_IMPLEMENTATION
 #include "libccar.h"
