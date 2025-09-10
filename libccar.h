@@ -9,6 +9,7 @@
 #ifndef LIBCCAR_H
 #define LIBCCAR_H
 
+#include <stdio.h>
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -141,7 +142,7 @@ typedef enum lcc_forced_induction_e { LCC_FI_NONE = 0, LCC_FI_TURBO = 1, LCC_FI_
 typedef enum lcc_diff_type_e { LCC_DIFF_OPEN = 0, LCC_DIFF_LOCKED = 1, LCC_DIFF_LSD_CLUTCH = 2, LCC_DIFF_TORSEN = 3, LCC_DIFF_ACTIVE = 4 } lcc_diff_type_t;
 
 /* events and callbacks */
-typedef enum lcc_event_type_e { LCC_EVENT_ENGINE_START = 0, LCC_EVENT_ENGINE_STOP = 1, LCC_EVENT_GEAR_CHANGE = 2, LCC_EVENT_ENGINE_STALL = 3, LCC_EVENT_OVERHEAT = 4, LCC_EVENT_FUEL_STARVATION = 5} lcc_event_type_t;
+typedef enum lcc_event_type_e { LCC_EVENT_ENGINE_START = 0, LCC_EVENT_ENGINE_STOP = 1, LCC_EVENT_GEAR_CHANGE = 2, LCC_EVENT_ENGINE_STALL = 3, LCC_EVENT_OVERHEAT = 4, LCC_EVENT_FUEL_STARVATION = 5 } lcc_event_type_t;
 
 /* driver aids */
 typedef enum lcc_abs_mode_e { LCC_ABS_OFF = 0, LCC_ABS_ON = 1 } lcc_abs_mode_t;
@@ -596,7 +597,7 @@ LCC_API void lcc_car_get_velocity(const lcc_car_t *car, float vel_world_out[2], 
 /* utilities */
 LCC_API void lcc_car_get_local_bounds(const lcc_car_t *car, float min_local_out[2], float max_local_out[2]);
 LCC_API int  lcc_car_get_wheel_global_positions(const lcc_car_t *car, float out_positions[][2], int max_wheels);
-float lcc_car_get_speed_kmh(const lcc_car_t *car);
+float        lcc_car_get_speed_kmh(const lcc_car_t *car);
 
 /* event subscription */
 LCC_API void lcc_car_set_event_callback(lcc_car_t *car, lcc_event_cb callback, void *user);
@@ -1076,7 +1077,7 @@ static void lcc__emit_event(lcc_car_t *car, lcc_event_type_t type, int data_i32,
   car->evt_cb(&evt, car->evt_user);
 }
 
-/* Ackermann on front axle if two steerable wheels are found, else uniform */
+/* ackermann on front axle if two steerable wheels are found, else uniform */
 static void lcc__apply_steering(lcc_car_t *car) {
   float in    = lcc__clampf(car->controls.steer, -1.0f, 1.0f);
   float max   = lcc__deg2rad(car->desc.steering.max_steer_deg);
@@ -1085,18 +1086,16 @@ static void lcc__apply_steering(lcc_car_t *car) {
   /* find front-left & front-right among steerables */
   int fiL = -1, fiR = -1;
   for(int i = 0; i < car->wheel_count; ++i) {
-    if(car->desc.wheels[i].steerable && car->desc.wheels[i].position_local[0] >= 0.0f) {
-      if(car->desc.wheels[i].position_local[1] < 0.0f) fiL = i;
-      else
-        fiR = i;
-    }
+    if(!car->desc.wheels[i].steerable || car->desc.wheels[i].position_local[0] < 0.0f) continue;
+    if(car->desc.wheels[i].position_local[1] < 0.0f) fiL = i;
+    else
+      fiR = i;
   }
 
   float wb    = fmaxf(0.1f, car->desc.chassis.wheelbase_m);
   float track = fmaxf(0.4f, car->desc.chassis.track_front_m);
   float af    = lcc__saturate(car->desc.steering.ackermann_factor);
-
-  if(fiL >= 0 && fiR >= 0 && fabsf(delta) > 1e-6f) {
+  if(fiL >= 0 && fiR >= 0) {
     float R     = wb / fmaxf(1e-3f, fabsf(tanf(delta)));
     float d_in  = atanf(wb / fmaxf(0.05f, R - 0.5f * track));
     float d_out = atanf(wb / fmaxf(0.05f, R + 0.5f * track));
@@ -1355,8 +1354,9 @@ static lcc_axle_torques_t lcc__diff_active(float T_in, float Tlim_L, float Tlim_
 
 /* engine torque model */
 static float lcc__engine_torque_compute(lcc_car_t *car, float rpm, float throttle) {
-  const lcc_engine_desc_t *ed   = &car->desc.engine;
-  float                    load = throttle;
+  const lcc_engine_desc_t *ed = &car->desc.engine;
+  if(rpm >= ed->redline_rpm) throttle = 0;
+  float load = throttle;
   if(ed->throttle_map.points && ed->throttle_map.count > 0) load = lcc__clampf(lcc__curve1d_eval(&ed->throttle_map, throttle), 0.0f, 1.0f);
 
   float wot      = lcc__curve1d_eval(&ed->wot_torque_nm_vs_rpm, rpm);
@@ -1373,7 +1373,6 @@ static float lcc__engine_torque_compute(lcc_car_t *car, float rpm, float throttl
   float pr = map_kpa / 100.0f;
   float tq = wot * load * pr - friction * (0.5f + 0.5f * (1.0f - load));
 
-  if(rpm >= ed->redline_rpm) tq = fminf(tq, 0.0f);
   return tq;
 }
 
@@ -1708,7 +1707,7 @@ static lcc_result_t lcc__car_step(lcc_car_t *car, float dt_s) {
   float Tw_front = Tw_total * splitF;
   float Tw_rear  = Tw_total * splitR;
 
-  /* Precompute tire kinematics and base lateral demand for traction limits */
+  /* precompute tire kinematics and base lateral demand for traction limits */
   float mu_i[LCC_MAX_WHEELS];
   float Cx_i[LCC_MAX_WHEELS], Cy_i[LCC_MAX_WHEELS];
   float vt_x[LCC_MAX_WHEELS], vt_y[LCC_MAX_WHEELS];
@@ -1731,12 +1730,12 @@ static lcc_result_t lcc__car_step(lcc_car_t *car, float dt_s) {
     mu_i[i] = lcc__tire_mu(&car->desc.tires[i], Fz_i[i], car->env.global_friction_scale, car->damage_state.tire_health[i]);
     lcc__tire_stiffness(&car->desc.tires[i], Fz_i[i], car->desc.wheels[i].width_m, &Cx_i[i], &Cy_i[i]);
 
-    /* relaxation dynamics: default to ~wheel radius if not set; clamp into realistic band */
+    /* relaxation dynamics: default to ~wheel radius if not set clamp into realistic band */
     {
       float Vrel = lcc__hypot2(vt_x[i], vt_y[i]);
       float Lx   = car->desc.tires[i].relaxation_length_long_m;
       float Ly   = car->desc.tires[i].relaxation_length_lat_m;
-      /* If unset/non-positive, use wheel radius; then clamp to typical 0.12–0.45 m band */
+      /* if unset/non-positive use wheel radius then clamp to typical 0.12–0.45 m band */
       if(!(Lx > 0.0f)) Lx = r_i[i];
       if(!(Ly > 0.0f)) Ly = r_i[i];
       Lx                      = lcc__clampf(Lx, 0.12f, 0.45f);
@@ -1900,10 +1899,7 @@ static lcc_result_t lcc__car_step(lcc_car_t *car, float dt_s) {
 
     /* telemetry */
     {
-      float denom_te = fmaxf(0.3f, fmaxf(fabsf(Vx), fabsf(ws->omega_radps * r)));
-      float s_te     = (ws->omega_radps * r - Vx) / denom_te;
-
-      ws->slip_ratio        = lcc__clampf(s_te, -3.0f, 3.0f);
+      ws->slip_ratio        = s_i[i];
       ws->slip_angle_rad    = a;
       ws->tire_force_long_n = Fx0;
       ws->tire_force_lat_n  = Fy0;

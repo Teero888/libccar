@@ -1090,13 +1090,7 @@ impl App {
 
                 let ws = &car.wheel_states[i];
 
-                let steer_max = self.desc.steering.max_steer_deg * (PI as f32 / 180.0);
-                let steer_angle = if self.desc.wheels[i].steerable != 0 {
-                    -self.controls.steer * steer_max
-                } else {
-                    0.0
-                };
-                let angle = yaw + steer_angle;
+                let angle = yaw + self.car_ref().wheel_steer_rad[i];
                 draw_wheel_vis(
                     &painter,
                     &|w| to_screen_point(w, self.camera_pos, self.zoom, center),
