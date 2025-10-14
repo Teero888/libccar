@@ -49,6 +49,7 @@ enum ViewPreset {
     Sports,
     Supercar,
     Hypercar,
+    Drift,
 }
 impl ViewPreset {
     fn all() -> &'static [ViewPreset] {
@@ -58,6 +59,7 @@ impl ViewPreset {
             ViewPreset::Sports,
             ViewPreset::Supercar,
             ViewPreset::Hypercar,
+            ViewPreset::Drift,
         ]
     }
     fn as_label(self) -> &'static str {
@@ -67,6 +69,7 @@ impl ViewPreset {
             ViewPreset::Sports => "Sports",
             ViewPreset::Supercar => "Supercar",
             ViewPreset::Hypercar => "Hypercar",
+            ViewPreset::Drift => "Drift",
         }
     }
 }
@@ -162,9 +165,6 @@ impl TelemetryRec {
             "yaw",
             "yaw_rate",
             "engine_rpm",
-            "engine_torque_nm",
-            "engine_thr_eff",
-            "manifold_kpa",
             "gear",
             "throttle_cmd",
             "brake_cmd",
@@ -175,6 +175,7 @@ impl TelemetryRec {
             "tc_on",
             "esc_on",
             "glue",
+            // wheel 0
             "w0_slip_ratio",
             "w0_slip_angle",
             "w0_omega",
@@ -183,10 +184,10 @@ impl TelemetryRec {
             "w0_Fz",
             "w0_Tdrv",
             "w0_Tbr",
-            "w0_PkPa",
             "w0_temp",
             "w0_mu",
             "w0_Fcap",
+            // wheel 1
             "w1_slip_ratio",
             "w1_slip_angle",
             "w1_omega",
@@ -195,10 +196,10 @@ impl TelemetryRec {
             "w1_Fz",
             "w1_Tdrv",
             "w1_Tbr",
-            "w1_PkPa",
             "w1_temp",
             "w1_mu",
             "w1_Fcap",
+            // wheel 2
             "w2_slip_ratio",
             "w2_slip_angle",
             "w2_omega",
@@ -207,10 +208,10 @@ impl TelemetryRec {
             "w2_Fz",
             "w2_Tdrv",
             "w2_Tbr",
-            "w2_PkPa",
             "w2_temp",
             "w2_mu",
             "w2_Fcap",
+            // wheel 3
             "w3_slip_ratio",
             "w3_slip_angle",
             "w3_omega",
@@ -219,11 +220,11 @@ impl TelemetryRec {
             "w3_Fz",
             "w3_Tdrv",
             "w3_Tbr",
-            "w3_PkPa",
             "w3_temp",
             "w3_mu",
             "w3_Fcap",
         ])?;
+
         for s in &self.data {
             let rec = vec![
                 s.t,
@@ -247,6 +248,7 @@ impl TelemetryRec {
                 (s.tc_on as i32) as f32,
                 (s.esc_on as i32) as f32,
                 (s.glue as i32) as f32,
+                // wheel 0
                 s.wheels[0].slip_ratio,
                 s.wheels[0].slip_angle,
                 s.wheels[0].omega,
@@ -258,6 +260,7 @@ impl TelemetryRec {
                 s.wheels[0].temp,
                 s.wheels[0].est_mu,
                 s.wheels[0].fcap,
+                // wheel 1
                 s.wheels[1].slip_ratio,
                 s.wheels[1].slip_angle,
                 s.wheels[1].omega,
@@ -269,6 +272,7 @@ impl TelemetryRec {
                 s.wheels[1].temp,
                 s.wheels[1].est_mu,
                 s.wheels[1].fcap,
+                // wheel 2
                 s.wheels[2].slip_ratio,
                 s.wheels[2].slip_angle,
                 s.wheels[2].omega,
@@ -280,6 +284,7 @@ impl TelemetryRec {
                 s.wheels[2].temp,
                 s.wheels[2].est_mu,
                 s.wheels[2].fcap,
+                // wheel 3
                 s.wheels[3].slip_ratio,
                 s.wheels[3].slip_angle,
                 s.wheels[3].omega,
@@ -586,6 +591,61 @@ impl App {
         let mut d: ffi::lcc_car_desc_t = mem::zeroed();
         ffi::lcc_car_desc_init_defaults(&mut d);
 
+        fn make_curve<const N: usize>(pts: [(f32, f32); N]) -> ffi::lcc_curve1d_t {
+            let mut v = Vec::<ffi::lcc_curve1d_point_t>::with_capacity(N);
+            for (x, y) in pts {
+                v.push(ffi::lcc_curve1d_point_t { x, y });
+            }
+            let b = Box::leak(v.into_boxed_slice());
+            ffi::lcc_curve1d_t {
+                points: b.as_ptr(),
+                count: N as i32,
+            }
+        }
+
+        const WEAK_WOT: [(f32, f32); 11] = [
+            (800.0, 120.0),
+            (1200.0, 150.0),
+            (1800.0, 175.0),
+            (2400.0, 195.0),
+            (3000.0, 210.0),
+            (3600.0, 220.0),
+            (4200.0, 225.0),
+            (4800.0, 225.0),
+            (5400.0, 215.0),
+            (6000.0, 200.0),
+            (6800.0, 180.0),
+        ];
+        const WEAK_FRIC: [(f32, f32); 8] = [
+            (0.0, 8.0),
+            (1000.0, 10.0),
+            (2000.0, 14.0),
+            (3000.0, 18.0),
+            (4000.0, 24.0),
+            (5000.0, 32.0),
+            (6000.0, 42.0),
+            (7000.0, 54.0),
+        ];
+        const DRIFT_WOT: [(f32, f32); 7] = [
+            (1000.0, 400.0),
+            (2000.0, 550.0),
+            (3000.0, 650.0),
+            (4000.0, 660.0),
+            (5000.0, 640.0),
+            (6000.0, 580.0),
+            (7000.0, 500.0),
+        ];
+        const DRIFT_FRIC: [(f32, f32); 8] = [
+            (0.0, 15.0),
+            (1000.0, 20.0),
+            (2000.0, 25.0),
+            (3000.0, 32.0),
+            (4000.0, 40.0),
+            (5000.0, 50.0),
+            (6000.0, 65.0),
+            (7000.0, 80.0),
+        ];
+
         match preset {
             ViewPreset::Economy => {
                 d.chassis.mass_kg = 1100.0;
@@ -641,44 +701,29 @@ impl App {
                 d.transmission.type_ = LCC_TRANS_MANUAL;
                 d.transmission.final_drive_ratio = 3.3;
             }
+            ViewPreset::Drift => {
+                d.chassis.mass_kg = 1300.0;
+                d.driveline.layout = LCC_LAYOUT_RWD;
+                d.engine.redline_rpm = 7200.0;
+                d.engine.idle_rpm = 650.0;
+                d.starter.power_w = 1500.0;
+                for i in 0..4 {
+                    d.tires[i].mu_nominal = 1.15;
+                }
+                d.aero.lift_coefficient_front = 0.0;
+                d.aero.lift_coefficient_rear = 0.0;
+                d.transmission.type_ = LCC_TRANS_MANUAL;
+                d.transmission.final_drive_ratio = 3.7;
+            }
         }
 
-        // simple engine maps (WOT + friction)
-        fn make_curve<const N: usize>(pts: [(f32, f32); N]) -> ffi::lcc_curve1d_t {
-            // We'll store in static memory via Box to keep alive for the app lifetime
-            let mut v = Vec::<ffi::lcc_curve1d_point_t>::with_capacity(N);
-            for (x, y) in pts {
-                v.push(ffi::lcc_curve1d_point_t { x, y });
-            }
-            let b = Box::leak(v.into_boxed_slice());
-            ffi::lcc_curve1d_t {
-                points: b.as_ptr(),
-                count: N as i32,
-            }
+        if preset == ViewPreset::Drift {
+            d.engine.wot_torque_nm_vs_rpm = make_curve(DRIFT_WOT);
+            d.engine.friction_torque_nm_vs_rpm = make_curve(DRIFT_FRIC);
+        } else {
+            d.engine.wot_torque_nm_vs_rpm = make_curve(WEAK_WOT);
+            d.engine.friction_torque_nm_vs_rpm = make_curve(WEAK_FRIC);
         }
-        d.engine.wot_torque_nm_vs_rpm = make_curve([
-            (800.0, 120.0),
-            (1200.0, 150.0),
-            (1800.0, 175.0),
-            (2400.0, 195.0),
-            (3000.0, 210.0),
-            (3600.0, 220.0),
-            (4200.0, 225.0),
-            (4800.0, 225.0),
-            (5400.0, 215.0),
-            (6000.0, 200.0),
-            (6800.0, 180.0),
-        ]);
-        d.engine.friction_torque_nm_vs_rpm = make_curve([
-            (0.0, 8.0),
-            (1000.0, 10.0),
-            (2000.0, 14.0),
-            (3000.0, 18.0),
-            (4000.0, 24.0),
-            (5000.0, 32.0),
-            (6000.0, 42.0),
-            (7000.0, 54.0),
-        ]);
 
         d
     }

@@ -613,6 +613,7 @@ LCC_API float lcc_rad_to_deg(float rad);
 #endif
 #endif /* LIBCCAR_H */
 
+#define LCC_IMPLEMENTATION
 #ifdef LCC_IMPLEMENTATION
 
 #include <math.h>
@@ -972,7 +973,7 @@ static void lcc__init_runtime(lcc_car_t *car) {
   lcc__zero(car->elec_state);
   lcc__zero(car->fuel_state);
   lcc__zero(car->cool_state);
-  lcc__zero(car->wheel_states); // note: no [0]; this zeros the whole array
+  lcc__zero(car->wheel_states);
   lcc__zero(car->damage_state);
   lcc__zero(car->controls);
   lcc__zero(car->abs_mod);
@@ -1251,6 +1252,24 @@ static void lcc__compute_normal_loads(lcc_car_t *car, float df_front, float df_r
   float dF_lat_front = m * ay * h / track_f;
   float dF_lat_rear  = m * ay * h / track_r;
 
+  /* the ARB adds to the lateral load transfer. we approximate roll angle
+   * as being proportional to lateral acceleration (ay). a full suspension
+   * model would be more accurate, but this is a very effective simplification.
+   */
+  if(track_f > 1e-3f) {
+    /* roll_angle_approx = ay / 9.81f; -- simplified out
+     * total_roll_moment = roll_angle_approx * (arb_f + arb_r)
+     * for simplicity, we directly add a force proportional to ay.
+     * the constant 0.05f is a tuning factor for roll stiffness sensitivity.
+     */
+    float arb_force_f = ay * car->desc.arbs.front_rate_n_per_rad * 0.05f / track_f;
+    dF_lat_front += arb_force_f;
+  }
+  if(track_r > 1e-3f) {
+    float arb_force_r = ay * car->desc.arbs.rear_rate_n_per_rad * 0.05f / track_r;
+    dF_lat_rear += arb_force_r;
+  }
+
   float Fz_front = Fz_front_static - dF_long;
   float Fz_rear  = Fz_rear_static + dF_long;
 
@@ -1293,23 +1312,12 @@ static lcc_axle_torques_t lcc__diff_open(float T_in, float Tlim_L, float Tlim_R)
 }
 
 static lcc_axle_torques_t lcc__diff_locked(float T_in, float Tlim_L, float Tlim_R) {
-  lcc_axle_torques_t r      = (lcc_axle_torques_t){ 0 };
-  float              s      = lcc__signf(T_in);
-  float              Tin    = lcc__absf(T_in);
-  float              TLcap  = fmaxf(0.0f, Tlim_L);
-  float              TRcap  = fmaxf(0.0f, Tlim_R);
-  float              TL     = fminf(0.5f * Tin, TLcap);
-  float              TR     = fminf(0.5f * Tin, TRcap);
-  float              rem    = fmaxf(0.0f, Tin - (TL + TR));
-  float              spareL = fmaxf(0.0f, TLcap - TL);
-  float              dL     = fminf(spareL, 0.5f * rem);
-  TL += dL;
-  float spareR = fmaxf(0.0f, TRcap - TR);
-  float dR     = fminf(spareR, rem - dL);
-  TR += dR;
-  r.left_nm  = s * TL;
-  r.right_nm = s * TR;
-  return r;
+    (void)Tlim_L;
+    (void)Tlim_R;
+    lcc_axle_torques_t r;
+    r.left_nm = 0.5f * T_in;
+    r.right_nm = 0.5f * T_in;
+    return r;
 }
 
 static lcc_axle_torques_t lcc__diff_torsen(float T_in, float Tlim_L, float Tlim_R, float bias_ratio, float preload_nm) {
@@ -1746,6 +1754,35 @@ static lcc_result_t lcc__car_step(lcc_car_t *car, float dt_s) {
       a_eff[i]                = car->slip_alpha_filt[i];
     }
   }
+  
+  if (car->desc.ecu.tc_mode == LCC_TC_ON) {
+    float max_slip = 0.0f;
+    for (int i = 0; i < car->wheel_count; ++i) {
+      if (car->desc.wheels[i].driven) {
+        /* we only care about positive slip (acceleration)*/
+        if (s_i[i] > max_slip) {
+          max_slip = s_i[i];
+        }
+      }
+    }
+
+    float slip_target = 0.10f; /* Target slip ratio */
+    float slip_error = max_slip - slip_target;
+
+    if (slip_error > 0.0f) {
+      /* Proportional gain: increase cut based on how far over we are */
+      float p_gain = 3.5f;
+      car->tc_cut += slip_error * p_gain * dt_s;
+    } else {
+      /* Recovery rate: slowly give power back when slip is under control */
+      float recovery_rate = 0.8f;
+      car->tc_cut -= recovery_rate * dt_s;
+    }
+    car->tc_cut = lcc__clampf(car->tc_cut, 0.0f, 0.85f); /* Clamp cut between 0% and 85% */
+  } else {
+    /* If TC is off, ensure the cut is always zero. */
+    car->tc_cut = 0.0f;
+  }
 
   /* find indices per axle */
   int fiL = -1, fiR = -1, riL = -1, riR = -1;
@@ -1831,8 +1868,19 @@ static lcc_result_t lcc__car_step(lcc_car_t *car, float dt_s) {
     float Fx_pure = lcc__pacejka_Fx_pure(s, mu_eff, Fz, Kx);
     float Fy_pure = lcc__pacejka_Fy_pure(a, mu_eff, Fz, Ky);
 
-    /* no additional combined-slip scaling (simple for now) */
-    float Fx0 = Fx_pure, Fy0 = Fy_pure;
+    float Fx0, Fy0;
+    float F_limit  = mu_eff * Fz;
+    float F_mag_sq = Fx_pure * Fx_pure + Fy_pure * Fy_pure;
+
+    if(F_mag_sq > F_limit * F_limit && F_mag_sq > 1e-6f) {
+      float F_mag = sqrtf(F_mag_sq);
+      float scale = F_limit / F_mag;
+      Fx0         = Fx_pure * scale;
+      Fy0         = Fy_pure * scale;
+    } else {
+      Fx0 = Fx_pure;
+      Fy0 = Fy_pure;
+    }
 
     /* rolling resistance (smooth sign) */
     float sgn_v = Vx / (fabsf(Vx) + 0.05f);
@@ -1840,19 +1888,28 @@ static lcc_result_t lcc__car_step(lcc_car_t *car, float dt_s) {
     Fx0 += Frr;
 
     /* low-speed vector friction fallback for static behavior */
-    if(car->car_state.speed_mps < 0.25f) {
+    if(car->car_state.speed_mps < 0.5f) {
       float Vx_slip = Vx - ws->omega_radps * r;
       float Vy_slip = Vy;
-      float vmag    = sqrtf(Vx_slip * Vx_slip + Vy_slip * Vy_slip);
-      if(vmag > 1e-6f) {
-        float Fcap = mu_base * Fz;
-        float nx = Vx_slip / vmag, ny = Vy_slip / vmag;
-        float Fx_ls = -Fcap * nx;
-        float Fy_ls = -Fcap * ny;
-        float b     = lcc__saturate((0.25f - car->car_state.speed_mps) / 0.25f);
-        Fx0         = lcc__lerp(Fx0, Fx_ls, b);
-        Fy0         = lcc__lerp(Fy0, Fy_ls, b);
+
+      /* damping force is proportional to slip velocity */
+      const float damping_coef = 50000.0f; /* N/(m/s), high value for firm stop */
+      float       Fx_damp      = -damping_coef * Vx_slip;
+      float       Fy_damp      = -damping_coef * Vy_slip;
+
+      /* ensure the damping force doesn't exceed available static friction */
+      float F_damp_mag_sq = Fx_damp * Fx_damp + Fy_damp * Fy_damp;
+      float F_cap         = mu_base * Fz;
+      if(F_damp_mag_sq > F_cap * F_cap) {
+        float F_damp_mag = sqrtf(F_damp_mag_sq);
+        Fx_damp          = Fx_damp * F_cap / F_damp_mag;
+        Fy_damp          = Fy_damp * F_cap / F_damp_mag;
       }
+
+      /* blend this stable force in as speed approaches zero */
+      float blend_factor = lcc__saturate((0.5f - car->car_state.speed_mps) / 0.5f);
+      Fx0                = lcc__lerp(Fx0, Fx_damp, blend_factor);
+      Fy0                = lcc__lerp(Fy0, Fy_damp, blend_factor);
     }
 
     /* brake torque + ESC */
@@ -1899,7 +1956,11 @@ static lcc_result_t lcc__car_step(lcc_car_t *car, float dt_s) {
 
     /* telemetry */
     {
-      ws->slip_ratio        = s_i[i];
+      float wheel_surf_v = ws->omega_radps * r;
+      float denom        = fmaxf(fabsf(Vx), fabsf(wheel_surf_v));
+      if(denom > 0.1f) ws->slip_ratio = (wheel_surf_v - Vx) / denom;
+      else
+        ws->slip_ratio = 0.0f;
       ws->slip_angle_rad    = a;
       ws->tire_force_long_n = Fx0;
       ws->tire_force_lat_n  = Fy0;
@@ -2226,7 +2287,7 @@ void lcc_aero_desc_init_defaults(lcc_aero_desc_t *desc) {
   lcc__pzero(desc);
   desc->drag_coefficient       = 0.31f;
   desc->frontal_area_m2        = 2.2f;
-  desc->lift_coefficient_front = -0.05f;
+  desc->lift_coefficient_front = -0.12f;
   desc->lift_coefficient_rear  = -0.10f;
   desc->yaw_drag_gain          = 0.05f;
 }
