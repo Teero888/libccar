@@ -40,18 +40,16 @@ impl App {
                 steer_wheel = gamepad.value(gilrs::Axis::LeftStickX);
 
                 // Throttle
-                // It reports [-1.0 (idle), 1.0 (pressed)]. Rescale to [0.0, 1.0].
-                throttle_wheel = 0.0; //(throttle_axis_val + 1.0) / 2.0;
-                println!("{}", gamepad.value(gilrs::Axis::RightZ));
-
+                throttle_wheel = gamepad
+                    .button_data(gilrs::Button::RightTrigger2)
+                    .map_or(0.0, |data| data.value());
                 // Brake
-                // It reports [-1.0 (idle), 1.0 (pressed)]. Rescale to [0.0, 1.0].
-                let brake_axis_val = gamepad.value(gilrs::Axis::LeftZ);
-                brake_wheel = (brake_axis_val + 1.0) / 2.0;
+                brake_wheel = gamepad
+                    .button_data(gilrs::Button::LeftTrigger2)
+                    .map_or(0.0, |data| data.value());
 
                 // Clutch
                 if gamepad.is_pressed(gilrs::Button::South) {
-                    // Fallback to 'A' button
                     clutch_wheel = 1.0;
                 }
 

@@ -16,7 +16,7 @@ rfd = "0.15.4"
 anyhow = "1.0"
 once_cell = "1.18"
 time = { version = "0.3", features = ["formatting"] }
-gilrs = "0.10.3"
+gilrs = "0.11.0"
 
 [build-dependencies]
 bindgen = "0.72"
