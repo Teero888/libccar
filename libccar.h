@@ -614,7 +614,7 @@ LCC_API float lcc_rad_to_deg(float rad);
 #endif
 #endif /* LIBCCAR_H */
 
-#define LCC_IMPLEMENTATION
+// #define LCC_IMPLEMENTATION
 #ifdef LCC_IMPLEMENTATION
 
 #include <math.h>
