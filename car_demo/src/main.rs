@@ -13,6 +13,7 @@ mod input;
 mod telemetry;
 mod ui;
 mod util;
+mod track;
 
 use app::App;
 use config::ViewPreset;

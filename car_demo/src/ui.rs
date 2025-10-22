@@ -85,13 +85,115 @@ impl Plots {
 // App impl block for UI methods
 
 impl App {
-    pub fn draw_world(&self, ui: &mut egui::Ui) {
-        let available = ui.available_rect_before_wrap();
-        let painter = ui.painter_at(available);
-        let rect = available;
+    pub fn draw_world(&mut self, ui: &mut egui::Ui) {
+        let rect = ui.available_rect_before_wrap(); // Get rect for drawing bounds
+        let painter = ui.painter_at(rect);
         let center = rect.center();
 
+        if !self.follow_camera {
+            let input = ui.input(|i| i.clone()); // Clone input state
+                                                 // Check if dragging within the panel's current clip rectangle
+            if input.pointer.primary_down() && ui.rect_contains_pointer(rect) {
+                let delta = input.pointer.delta();
+                if delta != egui::Vec2::ZERO {
+                    let world_delta_x = delta.x / self.zoom;
+                    let world_delta_y = -delta.y / self.zoom;
+                    self.camera_pos.x -= world_delta_x;
+                    self.camera_pos.y -= world_delta_y;
+                }
+            }
+        }
+
         draw_grid(&painter, rect, self.camera_pos, self.zoom);
+
+        if self.selected_track > 0 {
+            let track = &self.tracks[self.selected_track - 1];
+            let to_screen = |w: Vec2| -> Pos2 {
+                let rel = w - self.camera_pos;
+                let screen = Vec2::new(rel.x * self.zoom, -rel.y * self.zoom);
+                Pos2::new(center.x + screen.x, center.y + screen.y)
+            };
+
+            let half_w = track.width * 0.5;
+            let len = track.points.len();
+
+            if len > 2 {
+                let track_color = Color32::from_gray(80);
+                let line_color = Color32::from_gray(200);
+
+                let mut vtx_left = Vec::with_capacity(len);
+                let mut vtx_right = Vec::with_capacity(len);
+
+                for i in 0..len {
+                    let p_curr = track.points[i];
+                    // Calculate 't' corresponding to this point index
+                    let t = (i as f32 / len as f32) * track.length;
+                    let normal = track.get_normal(t); // Use the track's normal calculation
+
+                    vtx_left.push(egui::epaint::Vertex {
+                        pos: to_screen(p_curr + normal * half_w),
+                        uv: egui::Pos2::ZERO,
+                        color: track_color,
+                    });
+                    vtx_right.push(egui::epaint::Vertex {
+                        pos: to_screen(p_curr - normal * half_w),
+                        uv: egui::Pos2::ZERO,
+                        color: track_color,
+                    });
+                }
+
+                let mut mesh = egui::epaint::Mesh::default();
+                for i in 0..len {
+                    let next_i = (i + 1) % len;
+
+                    let v_left_curr = vtx_left[i];
+                    let v_right_curr = vtx_right[i];
+                    let v_left_next = vtx_left[next_i];
+                    let v_right_next = vtx_right[next_i];
+
+                    let base_idx = mesh.vertices.len() as u32;
+                    mesh.vertices.extend_from_slice(&[
+                        v_left_curr,
+                        v_right_curr,
+                        v_left_next,
+                        v_right_next,
+                    ]);
+
+                    mesh.add_triangle(base_idx, base_idx + 1, base_idx + 2);
+                    mesh.add_triangle(base_idx + 1, base_idx + 3, base_idx + 2);
+                }
+                painter.add(egui::Shape::Mesh(mesh.into()));
+
+                let mut left_line_points: Vec<Pos2> = vtx_left.iter().map(|v| v.pos).collect();
+                if len > 0 {
+                    left_line_points.push(vtx_left[0].pos);
+                }
+
+                let mut right_line_points: Vec<Pos2> = vtx_right.iter().map(|v| v.pos).collect();
+                if len > 0 {
+                    right_line_points.push(vtx_right[0].pos);
+                }
+
+                let white_line = Stroke::new(1.5, line_color);
+                painter.add(egui::Shape::line(left_line_points, white_line));
+                painter.add(egui::Shape::line(right_line_points, white_line));
+            }
+
+            for (i, (p1, p2)) in track.checkpoints.iter().enumerate() {
+                let color = if i == self.current_checkpoint && self.lap_start_time.is_some() {
+                    Color32::LIGHT_BLUE
+                } else {
+                    Color32::from_rgb(200, 200, 0)
+                };
+                painter.line_segment(
+                    [to_screen(*p1), to_screen(*p2)],
+                    Stroke::new(2.0, color.gamma_multiply(0.7)),
+                );
+            }
+            let sf_p1 = to_screen(track.start_finish.0);
+            let sf_p2 = to_screen(track.start_finish.1);
+            painter.line_segment([sf_p1, sf_p2], Stroke::new(3.0, Color32::LIGHT_GREEN));
+        }
 
         if self.show_trace && self.path_trace.len() > 1 {
             let to_screen = |w: Vec2| -> Pos2 {
@@ -452,7 +554,22 @@ impl App {
                     ui.selectable_value(&mut self.preset, *p, p.as_label());
                 }
             });
-        if ui.button("Apply Preset").clicked() {
+
+        egui::ComboBox::from_label("Track")
+            .selected_text(if self.selected_track == 0 {
+                "None"
+            } else {
+                self.tracks[self.selected_track - 1].name
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.selected_track, 0, "None");
+                for i in 0..self.tracks.len() {
+                    // Use (i+1) as the ID so 0 can be "None"
+                    ui.selectable_value(&mut self.selected_track, i + 1, self.tracks[i].name);
+                }
+            });
+
+        if ui.button("Apply Preset & Track").clicked() {
             unsafe {
                 self.reset();
             }
@@ -468,7 +585,7 @@ impl App {
             }
         });
         ui.checkbox(&mut self.follow_camera, "Follow camera");
-        ui.add(egui::Slider::new(&mut self.zoom, 8.0..=120.0).text("Zoom"));
+        ui.add(egui::Slider::new(&mut self.zoom, 2.0..=120.0).text("Zoom"));
 
         ui.separator();
         unsafe {
@@ -482,10 +599,84 @@ impl App {
             ui.label(format!("Gear: {}", ts.gear_index));
             ui.label(format!("Yaw: {:5.2} rad", cs.yaw_rad));
         }
+
+        ui.separator();
+        ui.collapsing("Lap Times", |ui| {
+            if self.selected_track == 0 {
+                ui.label("Select a track to start timing.");
+            } else {
+                let track = &self.tracks[self.selected_track - 1];
+                // Show current lap time
+                if let Some(start) = self.lap_start_time {
+                    let current_lap_time = start.elapsed().as_secs_f32();
+                    ui.label(RichText::new(format!("Current: {:.3}s", current_lap_time)).strong());
+                } else {
+                    ui.label("Cross start line to begin...");
+                }
+                // Show checkpoint progress
+                ui.label(format!(
+                    "Checkpoints: {} / {}",
+                    self.current_checkpoint,
+                    track.checkpoints.len()
+                ));
+
+                ui.separator();
+                ui.label("Completed Laps:");
+                // Show best lap
+                if let Some(best) = self
+                    .lap_times
+                    .iter()
+                    .min_by(|a, b| a.partial_cmp(b).unwrap())
+                {
+                    if *best > 0.0 {
+                        ui.label(
+                            RichText::new(format!("Best: {:.3}s", best))
+                                .color(Color32::LIGHT_YELLOW),
+                        );
+                    }
+                }
+                // Show lap history
+                egui::ScrollArea::vertical()
+                    .max_height(100.0)
+                    .show(ui, |ui| {
+                        if self.lap_times.is_empty() {
+                            ui.label("No laps completed.");
+                        }
+                        // Show all laps in reverse order
+                        for (i, time) in self.lap_times.iter().enumerate().rev() {
+                            ui.label(format!("Lap {}: {:.3}s", i + 1, time));
+                        }
+                    });
+                if ui.button("Clear Laps").clicked() {
+                    self.lap_times.clear();
+                    self.lap_start_time = None;
+                    self.current_checkpoint = 0;
+                }
+            }
+        });
+
         ui.separator();
         ui.collapsing("Controls", |ui| {
-            ui.monospace("a/d = steer\nw/s = shift\nh = clutch\nj = brake\nk = throttle\nSpace = hold START (ign ON)");
-            ui.monospace("\nGamepad/Wheel: \nSteer: L-Stick X / Wheel\nGas: R-Trigger / Throttle Pedal\nBrake: L-Trigger / Brake Pedal\nClutch: 'A' / Clutch Pedal\nShift: X/Y / Paddles");
+            ui.monospace(
+                "a/d = steer\n\
+                 w/s = shift up/down\n\
+                 k = throttle\n\
+                 j = brake\n\
+                 h = clutch\n\
+                 c = handbrake\n\
+                 Space = hold START (ign ON)",
+            );
+            ui.monospace(
+                "\nGamepad/Wheel: \n\
+                 Steer: L-Stick X / Wheel\n\
+                 Gas: R-Trigger / Throttle Pedal\n\
+                 Brake: L-Trigger / Brake Pedal\n\
+                 Clutch: 'A' (South) / Clutch Pedal\n\
+                 Shift Up: R-Bumper (RB) / Paddle\n\
+                 Shift Down: L-Bumper (LB) / Paddle\n\
+                 Handbrake: 'B' (East)\n\
+                 Start: 'Start' Button",
+            );
         });
 
         ui.separator();
@@ -767,8 +958,6 @@ impl App {
         }
     }
 }
-
-// UI Helper Functions (private to this module)
 
 fn draw_grid(painter: &Painter, rect: Rect, cam: Vec2, zoom: f32) {
     let grid_color = Color32::from_gray(50);

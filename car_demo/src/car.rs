@@ -6,10 +6,35 @@ use crate::{
     ffi_bindings::{LCC_TRANS_DCT, LCC_TRANS_MANUAL},
     input::InputState,
     telemetry::{TelemetryRec, TelemetrySample, WheelSample},
+    track::Track, // Import Track
     ui::{Plots, SkidSegment},
 };
 use glam::{Mat2, Vec2};
 use std::{mem, time::Instant};
+
+// Sets the initial pos of the car based on the selected track.
+unsafe fn set_initial_car_pos(
+    car_ptr: *mut ffi::lcc_car_t,
+    selected_track_idx: usize,
+    tracks: &[Track],
+) {
+    let initial_pos: Vec2;
+    let initial_yaw: f32; // Default facing positive X
+
+    if selected_track_idx > 0 {
+        let track = &tracks[selected_track_idx - 1];
+        let spawn_distance_behind_start = 10.0;
+        let start_dir = track.get_direction(0.0);
+        let start_pos = track.get_position(0.0);
+        initial_pos = start_pos - start_dir * spawn_distance_behind_start;
+        initial_yaw = start_dir.y.atan2(start_dir.x);
+    } else {
+        initial_pos = Vec2::new(0.0, 0.0);
+        initial_yaw = 0.0; // Face +X
+    }
+
+    let _ = ffi::lcc_car_set_pos(car_ptr, initial_pos.as_ref().as_ptr(), initial_yaw);
+}
 
 impl App {
     pub unsafe fn make_desc_from_preset(preset: ViewPreset) -> ffi::lcc_car_desc_t {
@@ -172,7 +197,12 @@ impl App {
         if active_gamepad.is_some() {
             println!("Steering wheel/gamepad connected!");
         }
-        // End init
+
+        // Initialize track data before setting pos
+        let tracks = crate::track::get_predefined_tracks();
+        let selected_track_idx = 0; // Default to "None" initially
+
+        set_initial_car_pos(car, selected_track_idx, &tracks);
 
         let mut this = Self {
             car,
@@ -191,7 +221,7 @@ impl App {
             plots: Plots::new(),
             zoom: 32.0,
             follow_camera: true,
-            camera_pos: Vec2::ZERO,
+            camera_pos: Vec2::ZERO, // Will be centered shortly
             skid_segments: Vec::new(),
             skid_ttl: 6.0,
             show_skids: true,
@@ -200,6 +230,13 @@ impl App {
             min_speed_for_skid_kmh: 10.0,
             last_wheel_world: [Vec2::ZERO; 4],
             have_last_wheel_world: false,
+            tracks, // Use the initialized tracks
+            selected_track: selected_track_idx,
+            lap_times: Vec::new(),
+            lap_start_time: None,
+            current_checkpoint: 0,
+            last_pos: Vec2::ZERO, // Will be set by set_initial_car_pos indirectly
+            have_last_pos: false,
             abs_on: false,
             tc_on: false,
             esc_on: false,
@@ -214,7 +251,11 @@ impl App {
         ffi::lcc_car_set_abs(this.car, if this.abs_on { LCC_ABS_ON } else { LCC_ABS_OFF });
         ffi::lcc_car_set_tc(this.car, if this.tc_on { LCC_TC_ON } else { LCC_TC_OFF });
         ffi::lcc_car_set_esc(this.car, if this.esc_on { LCC_ESC_ON } else { LCC_ESC_OFF });
+
         this.center_camera_on_car();
+        this.last_pos = this.world_pos();
+        this.have_last_pos = true;
+
         this
     }
 
@@ -224,16 +265,26 @@ impl App {
         }
         self.desc.environment = self.env;
         self.car = ffi::lcc_car_create(&self.desc as *const _);
+
+        set_initial_car_pos(self.car, self.selected_track, &self.tracks);
+
         // aids
         ffi::lcc_car_set_abs(self.car, if self.abs_on { LCC_ABS_ON } else { LCC_ABS_OFF });
         ffi::lcc_car_set_tc(self.car, if self.tc_on { LCC_TC_ON } else { LCC_TC_OFF });
         ffi::lcc_car_set_esc(self.car, if self.esc_on { LCC_ESC_ON } else { LCC_ESC_OFF });
+
+        // Reset other state
         self.telemetry_rec.clear();
         self.plots = Plots::new();
         self.path_trace.clear();
         self.skid_segments.clear();
         self.have_last_wheel_world = false;
+        self.lap_times.clear();
+        self.lap_start_time = None;
+        self.current_checkpoint = 0;
         self.center_camera_on_car();
+        self.last_pos = self.world_pos();
+        self.have_last_pos = true;
     }
 
     pub fn center_camera_on_car(&mut self) {
@@ -249,9 +300,10 @@ impl App {
     }
 
     pub unsafe fn reset(&mut self) {
+        // We keep the selected track, but reset the car desc to the preset
         self.desc = Self::make_desc_from_preset(self.preset);
-        self.env = self.desc.environment;
-        self.recreate_from_desc();
+        self.env = self.desc.environment; // Update env if preset changed it
+        self.recreate_from_desc(); // This now handles setting the pos based on selected_track
         self.config = CarConfig::from_desc(&self.desc);
     }
 
@@ -281,6 +333,19 @@ impl App {
         self.plots
             .push(rpm, speed_kmh, omega, slip, cs.yaw_rate_radps);
 
+        let glue = cs.speed_mps < 0.25;
+
+        let pos = Vec2::new(cs.pos_world[0], cs.pos_world[1]);
+
+        // Lap timing logic
+        if self.selected_track > 0 {
+            let track = self.tracks[self.selected_track - 1].clone(); // Clone to avoid borrow issue TODO: make this not shit idk how to avoid the borrow checker. worst enemy
+            if self.have_last_pos {
+                self.check_lap_timing(self.last_pos, pos, &track);
+            }
+        }
+        self.last_pos = pos;
+
         // helper: estimate mu and mu*Fz as in lib
         let est_mu_fc = |i: usize, wst: &ffi::lcc_wheel_state_t| -> (f32, f32) {
             let fz = wst.normal_force_n.max(0.0);
@@ -308,10 +373,6 @@ impl App {
             }
         };
 
-        let glue = cs.speed_mps < 0.25;
-
-        // compute wheel world positions from pose
-        let pos = Vec2::new(cs.pos_world[0], cs.pos_world[1]);
         let rot = Mat2::from_angle(cs.yaw_rad);
         let wheel_world: [Vec2; 4] = (0..4)
             .map(|i| {

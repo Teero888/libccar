@@ -32,6 +32,8 @@ impl App {
         let mut clutch_wheel: f32 = 0.0;
         let mut shift_up_pressed = false;
         let mut shift_down_pressed = false;
+        let mut handbrake_pressed = false;
+        let mut starter_pressed = false;
 
         // Gamepad/Steering Wheel Input
         if let (Some(gilrs), Some(gamepad_id)) = (self.gilrs.as_ref(), self.active_gamepad) {
@@ -56,13 +58,16 @@ impl App {
                 // Shifting
                 shift_up_pressed = gamepad.is_pressed(gilrs::Button::RightTrigger);
                 shift_down_pressed = gamepad.is_pressed(gilrs::Button::LeftTrigger);
+
+                // Handbrake
+                handbrake_pressed = gamepad.is_pressed(gilrs::Button::East);
+
+                // Starter
+                starter_pressed = gamepad.is_pressed(gilrs::Button::Start);
             }
         }
 
-        // Keyboard Input (as fallback)
         let input = ctx.input(|i| i.clone());
-
-        // Combine Inputs
 
         // Steering: Direct from wheel, smoothed from keyboard
         let target_steer_key = if input.key_down(egui::Key::A) {
@@ -111,9 +116,13 @@ impl App {
         };
         self.input.clutch = linear_approach(self.input.clutch, target_clutch, 8.0, dt);
 
-        // Handbrake: Keyboard only for simplicity
-        let handbrake_down = input.key_down(egui::Key::C);
-        self.input.handbrake = if handbrake_down { 1.0 } else { 0.0 };
+        // Handbrake: Combine gamepad and keyboard
+        let handbrake_key_down = input.key_down(egui::Key::C);
+        self.input.handbrake = if handbrake_key_down || handbrake_pressed {
+            1.0
+        } else {
+            0.0
+        };
 
         // Shifting: Combine gamepad and keyboard
         let w = input.key_pressed(egui::Key::W);
@@ -128,9 +137,10 @@ impl App {
         self.input.last_w = w || shift_up_pressed;
         self.input.last_s = s || shift_down_pressed;
 
-        // starter (space) + ignition on
+        // starter (space) + ignition on: Combine gamepad and keyboard
         self.controls.ignition_switch = 1;
-        self.controls.starter = if input.key_down(egui::Key::Space) {
+        let starter_key_down = input.key_down(egui::Key::Space);
+        self.controls.starter = if starter_key_down || starter_pressed {
             1
         } else {
             0

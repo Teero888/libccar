@@ -20,7 +20,7 @@ pub struct WheelSample {
 }
 #[derive(Serialize, Clone)]
 pub struct TelemetrySample {
-    // time & pose
+    // time & pos
     pub t: f32,
     pub dt: f32,
     pub pos_x: f32,
