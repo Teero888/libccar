@@ -26,7 +26,7 @@ jobs:
 
       - name: Install build tools (Linux)
         if: matrix.os == 'ubuntu-latest'
-        run: sudo apt-get update && sudo apt-get install -y build-essential
+        run: sudo apt-get update && sudo apt-get install -y build-essential libudev-dev
 
       - name: Install build tools (Windows)
         if: matrix.os == 'windows-latest'
