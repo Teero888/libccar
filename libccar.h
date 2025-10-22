@@ -490,6 +490,7 @@ typedef struct {
 
   float shift_timer_s;
   int   pending_gear_index;
+  int   wanted_gear_index;
 
   /* aids internal state TODO: refactor this, this is bad lol? */
   float abs_mod[LCC_MAX_WHEELS];
@@ -1045,6 +1046,7 @@ static void lcc__init_runtime(lcc_car_t *car) {
 
   car->shift_timer_s      = 0.0f;
   car->pending_gear_index = car->trans_state.gear_index;
+  car->wanted_gear_index  = car->trans_state.gear_index;
 
   for(int i = 0; i < car->wheel_count; ++i) {
     car->damage_state.brake_health[i] = 1.0f;
@@ -1312,12 +1314,12 @@ static lcc_axle_torques_t lcc__diff_open(float T_in, float Tlim_L, float Tlim_R)
 }
 
 static lcc_axle_torques_t lcc__diff_locked(float T_in, float Tlim_L, float Tlim_R) {
-    (void)Tlim_L;
-    (void)Tlim_R;
-    lcc_axle_torques_t r;
-    r.left_nm = 0.5f * T_in;
-    r.right_nm = 0.5f * T_in;
-    return r;
+  (void)Tlim_L;
+  (void)Tlim_R;
+  lcc_axle_torques_t r;
+  r.left_nm  = 0.5f * T_in;
+  r.right_nm = 0.5f * T_in;
+  return r;
 }
 
 static lcc_axle_torques_t lcc__diff_torsen(float T_in, float Tlim_L, float Tlim_R, float bias_ratio, float preload_nm) {
@@ -1754,22 +1756,20 @@ static lcc_result_t lcc__car_step(lcc_car_t *car, float dt_s) {
       a_eff[i]                = car->slip_alpha_filt[i];
     }
   }
-  
-  if (car->desc.ecu.tc_mode == LCC_TC_ON) {
+
+  if(car->desc.ecu.tc_mode == LCC_TC_ON) {
     float max_slip = 0.0f;
-    for (int i = 0; i < car->wheel_count; ++i) {
-      if (car->desc.wheels[i].driven) {
+    for(int i = 0; i < car->wheel_count; ++i) {
+      if(car->desc.wheels[i].driven) {
         /* we only care about positive slip (acceleration)*/
-        if (s_i[i] > max_slip) {
-          max_slip = s_i[i];
-        }
+        if(s_i[i] > max_slip) max_slip = s_i[i];
       }
     }
 
     float slip_target = 0.10f; /* Target slip ratio */
-    float slip_error = max_slip - slip_target;
+    float slip_error  = max_slip - slip_target;
 
-    if (slip_error > 0.0f) {
+    if(slip_error > 0.0f) {
       /* Proportional gain: increase cut based on how far over we are */
       float p_gain = 3.5f;
       car->tc_cut += slip_error * p_gain * dt_s;
@@ -2038,6 +2038,13 @@ static lcc_result_t lcc__car_step(lcc_car_t *car, float dt_s) {
     }
   }
 
+  /* do incremental shift towards wanted gear index */
+  if(!car->trans_state.shifting && car->trans_state.gear_index != car->wanted_gear_index) {
+    car->pending_gear_index   = car->trans_state.gear_index > car->wanted_gear_index ? car->trans_state.gear_index - 1 : car->trans_state.gear_index + 1;
+    car->trans_state.shifting = 1;
+    car->shift_timer_s        = lcc__clampf(car->desc.transmission.shift_time_s, 0.05f, 1.0f);
+  }
+
   /* shift timing */
   if(car->trans_state.shifting) {
     car->shift_timer_s -= dt_s;
@@ -2250,7 +2257,7 @@ void lcc_transmission_desc_init_defaults(lcc_transmission_desc_t *desc) {
   };
   for(int i = 0; i < desc->gear_count; ++i) desc->gear_ratios[i] = gr[i];
   desc->final_drive_ratio  = 3.9f;
-  desc->shift_time_s       = 0.30f;
+  desc->shift_time_s       = 0.10f;
   desc->auto_upshift_rpm   = 6500.0f;
   desc->auto_downshift_rpm = 1200.0f;
 }
@@ -2537,22 +2544,20 @@ lcc_result_t lcc_car_set_steering_params(lcc_car_t *car, const lcc_steering_desc
 lcc_result_t lcc_car_request_gear(lcc_car_t *car, int gear_index) {
   if(!car) return LCC_ERR_INVALID_ARG;
   if(gear_index < 0 || gear_index >= car->desc.transmission.gear_count) return LCC_ERR_BOUNDS;
-  car->pending_gear_index   = gear_index;
-  car->trans_state.shifting = 1;
-  car->shift_timer_s        = lcc__clampf(car->desc.transmission.shift_time_s, 0.05f, 1.0f);
+  car->wanted_gear_index = gear_index;
   return LCC_OK;
 }
 
 lcc_result_t lcc_car_shift_up(lcc_car_t *car) {
   if(!car) return LCC_ERR_INVALID_ARG;
-  int next = car->trans_state.gear_index + 1;
+  int next = car->wanted_gear_index + 1;
   if(next >= car->desc.transmission.gear_count) return LCC_ERR_BOUNDS;
   return lcc_car_request_gear(car, next);
 }
 
 lcc_result_t lcc_car_shift_down(lcc_car_t *car) {
   if(!car) return LCC_ERR_INVALID_ARG;
-  int next     = car->trans_state.gear_index - 1;
+  int next     = car->wanted_gear_index - 1;
   int min_gear = car->desc.transmission.type != LCC_TRANS_MANUAL ? 2 : 0;
   if(next < min_gear) return LCC_ERR_BOUNDS;
   return lcc_car_request_gear(car, next);
