@@ -664,6 +664,7 @@ impl App {
                  j = brake\n\
                  h = clutch\n\
                  c = handbrake\n\
+                 r = reset\n\
                  Space = hold START (ign ON)",
             );
             ui.monospace(
@@ -675,7 +676,8 @@ impl App {
                  Shift Up: R-Bumper (RB) / Paddle\n\
                  Shift Down: L-Bumper (LB) / Paddle\n\
                  Handbrake: 'B' (East)\n\
-                 Start: 'Start' Button",
+                 Start: 'Start' Button\n\
+                 Reset: 'Select' (Back) Button",
             );
         });
 

@@ -34,7 +34,7 @@ impl App {
         let mut shift_down_pressed = false;
         let mut handbrake_pressed = false;
         let mut starter_pressed = false;
-
+        let mut reset_pressed = false;
         // Gamepad/Steering Wheel Input
         if let (Some(gilrs), Some(gamepad_id)) = (self.gilrs.as_ref(), self.active_gamepad) {
             if let Some(gamepad) = gilrs.connected_gamepad(gamepad_id) {
@@ -64,10 +64,20 @@ impl App {
 
                 // Starter
                 starter_pressed = gamepad.is_pressed(gilrs::Button::Start);
+
+                // Reset
+                reset_pressed = gamepad.is_pressed(gilrs::Button::Select);
             }
         }
 
         let input = ctx.input(|i| i.clone());
+
+        // Reset: Combine gamepad and keyboard
+        let reset_key_pressed = input.key_pressed(egui::Key::R);
+        if reset_key_pressed || reset_pressed {
+            self.reset();
+            return; // car has been recreated
+        }
 
         // Steering: Direct from wheel, smoothed from keyboard
         let target_steer_key = if input.key_down(egui::Key::A) {
