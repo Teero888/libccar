@@ -1,0 +1,55 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-android:
+    name: Build APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, armv7-linux-androideabi
+
+      - name: Set up Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26d
+          add-to-path: true
+
+      - name: Install cargo-apk
+        run: cargo install cargo-apk
+
+      - name: Set up cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            car_demo/target/
+            ~/.cargo/registry/
+            ~/.cargo/git/
+          key: ${{ runner.os }}-cargo-android-${{ hashFiles('car_demo/Cargo.lock') }}
+
+      - name: Add Android metadata to Cargo.toml
+        run: |
+          echo "" >> car_demo/Cargo.toml
+          echo "[package.metadata.android]" >> car_demo/Cargo.toml
+          echo "package_name = \"com.libccar.demo\"" >> car_demo/Cargo.toml
+          echo "label = \"libccar Demo\"" >> car_demo/Cargo.toml
+        shell: bash
+
+      - name: Build release APK
+        working-directory: car_demo
+        run: cargo apk build --release
+
+      - name: Upload APK as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: car_demo/target/android-artifacts/release/apk/*.apk
+          retention-days: 7
