@@ -35,14 +35,6 @@ jobs:
             ~/.cargo/git/
           key: ${{ runner.os }}-cargo-android-${{ hashFiles('car_demo/Cargo.lock') }}
 
-      - name: Add Android metadata to Cargo.toml
-        run: |
-          echo "" >> car_demo/Cargo.toml
-          echo "[package.metadata.android]" >> car_demo/Cargo.toml
-          echo "package_name = \"com.libccar.demo\"" >> car_demo/Cargo.toml
-          echo "label = \"libccar Demo\"" >> car_demo/Cargo.toml
-        shell: bash
-
       - name: Build release APK
         working-directory: car_demo
         run: cargo apk build --release
