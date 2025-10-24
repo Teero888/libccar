@@ -7,7 +7,7 @@ edition = "2021"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-eframe = { version = "0.32.1", features = ["android-game-activity"] }
+eframe = { version = "0.32.1", default-features = false, features = ["glow", "android-native-activity"] }
 egui = "0.32.1"
 egui_extras = "0.32.1"
 egui_plot = "0.33"
@@ -39,3 +39,12 @@ link-system = []
 [package.metadata.android]
 package_name = "com.libccar.demo"
 label = "libccar"
+build_targets = ["aarch64-linux-android"]
+min_sdk_version = 23
+target_sdk_version = 30
+
+[package.metadata.android.signing.release]
+path = "~/.android/debug.keystore"
+keypass = "android"
+keystore_password = "android"
+alias = "androiddebugkey"

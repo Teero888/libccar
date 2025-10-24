@@ -35,8 +35,8 @@ jobs:
           ndk-version: r26d
           add-to-path: true
 
-      - name: Install cargo-apk
-        run: cargo install cargo-apk
+      - name: Install x-build
+        run: cargo install xbuild
 
       - name: Set up cargo cache
         uses: actions/cache@v4
@@ -59,11 +59,11 @@ jobs:
           CARGO_APK_RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
           CARGO_APK_RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
           CARGO_APK_RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
-        run: cargo apk -- build --release
+        run: x build --release --arch arm64 --platform android --format apk
 
       - name: Upload APK as artifact
         uses: actions/upload-artifact@v4
         with:
           name: android-apk
-          path: car_demo/target/android-artifacts/release/apk/*.apk
+          path: target/x/release/android/*.apk
           retention-days: 7
