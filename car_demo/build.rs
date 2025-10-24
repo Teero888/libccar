@@ -18,7 +18,7 @@ fn build_or_link() {
     let lib_dir = env::var("LIBCCAR_LIB_DIR").unwrap_or_else(|_| "lib".to_string());
 
     // Make an absolute path (best effort)
-    let abs = fs::canonicalize(&lib_dir).unwrap_or_else(|_| PathBuf::from(&lib_dir));
+    let abs = std::fs::canonicalize(&lib_dir).unwrap_or_else(|_| PathBuf::from(&lib_dir));
 
     // Linker search path + link name
     println!("cargo:rustc-link-search=native={}", abs.display());
@@ -55,16 +55,39 @@ fn main() {
 
     build_or_link();
 
-    let bindings = bindgen::Builder::default()
+    let target = env::var("TARGET").unwrap();
+
+    let mut bbuilder = bindgen::Builder::default()
         .header("../libccar.h")
         .allowlist_type("lcc_.*")
         .allowlist_function("lcc_.*")
         .allowlist_var("LCC_.*")
         .generate_comments(true)
         .derive_default(true)
-        .constified_enum("lcc_.*")
-        .generate()
-        .expect("bindgen failed");
+        .constified_enum("lcc_.*");
+
+    // Android-specific clang args for bindgen when cross-compiling
+    if target.contains("android") {
+        if let Ok(ndk_home) = env::var("NDK_HOME") {
+            // The GHA runner is linux-x86_64, so we use that host tag.
+            // TODO: determine this automatically.
+            let host_tag = "linux-x86_64";
+            let ndk_sysroot = PathBuf::from(ndk_home)
+                .join("toolchains/llvm/prebuilt")
+                .join(host_tag)
+                .join("sysroot");
+
+            bbuilder = bbuilder
+                .clang_arg(format!("--target={}", target))
+                .clang_arg(format!("--sysroot={}", ndk_sysroot.display()));
+        } else {
+            println!("cargo:warning=NDK_HOME not set. Bindgen might fail for Android target.");
+            // Fallback, just pass the target.
+            bbuilder = bbuilder.clang_arg(format!("--target={}", target));
+        }
+    }
+
+    let bindings = bbuilder.generate().expect("bindgen failed");
     let out = PathBuf::from(env::var("OUT_DIR").unwrap());
     bindings
         .write_to_file(out.join("bindings.rs"))
