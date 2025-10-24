@@ -5,18 +5,7 @@
     non_upper_case_globals
 )]
 
-mod app;
-mod car;
-mod config;
-mod ffi_bindings;
-mod input;
-mod telemetry;
-mod ui;
-mod util;
-mod track;
-
-use app::App;
-use config::ViewPreset;
+use libccar_demo::{App, ViewPreset};
 
 fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
