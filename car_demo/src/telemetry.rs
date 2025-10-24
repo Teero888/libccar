@@ -77,6 +77,7 @@ impl TelemetryRec {
             }
         }
     }
+    #[cfg(not(target_os = "android"))]
     pub fn export_csv(&self, path: &std::path::Path) -> anyhow::Result<()> {
         let mut wtr = csv::Writer::from_path(path)?;
         wtr.write_record(&[
@@ -228,6 +229,7 @@ impl TelemetryRec {
         wtr.flush()?;
         Ok(())
     }
+    #[cfg(not(target_os = "android"))]
     pub fn export_json(&self, path: &std::path::Path) -> anyhow::Result<()> {
         let s = serde_json::to_string_pretty(&self.data)?;
         std::fs::write(path, s)?;

@@ -739,26 +739,31 @@ impl App {
                     self.telemetry_rec.clear();
                 }
             });
-            if ui.button("Export CSV").clicked() {
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("CSV", &["csv"])
-                    .save_file()
-                {
-                    if let Err(e) = self.telemetry_rec.export_csv(&path) {
-                        eprintln!("CSV export failed: {e:?}");
+
+            #[cfg(not(target_os = "android"))]
+            {
+                if ui.button("Export CSV").clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("CSV", &["csv"])
+                        .save_file()
+                    {
+                        if let Err(e) = self.telemetry_rec.export_csv(&path) {
+                            eprintln!("CSV export failed: {e:?}");
+                        }
+                    }
+                }
+                if ui.button("Export JSON").clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("JSON", &["json"])
+                        .save_file()
+                    {
+                        if let Err(e) = self.telemetry_rec.export_json(&path) {
+                            eprintln!("JSON export failed: {e:?}");
+                        }
                     }
                 }
             }
-            if ui.button("Export JSON").clicked() {
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("JSON", &["json"])
-                    .save_file()
-                {
-                    if let Err(e) = self.telemetry_rec.export_json(&path) {
-                        eprintln!("JSON export failed: {e:?}");
-                    }
-                }
-            }
+
             ui.label(format!("Samples: {}", self.telemetry_rec.data.len()));
         });
 
