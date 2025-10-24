@@ -19,11 +19,14 @@ pub use app::App;
 pub use config::ViewPreset;
 
 #[cfg(target_os = "android")]
+use android_activity::AndroidApp;
+
+#[cfg(target_os = "android")]
 #[no_mangle]
-fn android_main(app: eframe::android_activity::AndroidApp) {
+fn android_main(app: AndroidApp) {
     android_logger::init_once(
         android_logger::Config::default()
-            .with_min_level(log::Level::Info)
+            .with_max_level(log::LevelFilter::Info)
             .with_tag("libccar_demo"),
     );
 
