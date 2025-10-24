@@ -35,6 +35,16 @@ jobs:
           ndk-version: r26d
           add-to-path: true
 
+      - name: Manually Install ncurses5/tinfo5
+        run: |
+          # Download packages from the 22.04 (jammy) repositories
+          wget http://archive.ubuntu.com/ubuntu/pool/universe/n/ncurses/libtinfo5_6.3-2_amd64.deb
+          wget http://archive.ubuntu.com/ubuntu/pool/universe/n/ncurses/libncurses5_6.3-2_amd64.deb
+
+          # Install the downloaded packages
+          sudo dpkg -i libtinfo5_6.3-2_amd64.deb
+          sudo dpkg -i libncurses5_6.3-2_amd64.deb
+
       - name: Install LLVM and Clang
         uses: KyleMayes/install-llvm-action@v2
         with:
