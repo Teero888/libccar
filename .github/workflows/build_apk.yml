@@ -59,7 +59,7 @@ jobs:
           CARGO_APK_RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
           CARGO_APK_RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
           CARGO_APK_RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
-        run: cargo apk build --release
+        run: cargo apk -- build --release
 
       - name: Upload APK as artifact
         uses: actions/upload-artifact@v4
