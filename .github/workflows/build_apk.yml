@@ -30,6 +30,7 @@ jobs:
 
       - name: Set up Android NDK
         uses: nttld/setup-ndk@v1
+        id: setup-ndk
         with:
           ndk-version: r26d
           add-to-path: true
@@ -48,6 +49,8 @@ jobs:
 
       - name: Build release APK
         working-directory: car_demo
+        env:
+          NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: cargo apk build --release
 
       - name: Upload APK as artifact
