@@ -225,9 +225,6 @@ impl App {
             skid_segments: Vec::new(),
             skid_ttl: 6.0,
             show_skids: true,
-            slip_ratio_threshold: 0.15,
-            slip_angle_threshold: 0.12,
-            min_speed_for_skid_kmh: 10.0,
             last_wheel_world: [Vec2::ZERO; 4],
             have_last_wheel_world: false,
             tracks, // Use the initialized tracks
@@ -440,15 +437,9 @@ impl App {
         } else {
             for i in 0..4 {
                 let w = &ws[i];
-                let sr = w.slip_ratio.abs();
-                let sa = w.slip_angle_rad.abs();
-                let long = (sr / self.slip_ratio_threshold).max(0.0);
-                let lat = (sa / self.slip_angle_threshold).max(0.0);
-                let severity = long.max(lat).min(3.0);
-                let moving = speed_kmh > self.min_speed_for_skid_kmh;
-                let loaded = w.normal_force_n > 50.0;
-                if self.show_skids && moving && loaded && severity >= 1.0 {
-                    let strength = ((severity - 1.0) / 2.0).clamp(0.2, 1.0);
+                let severity = (w.slip_ratio.powi(2) + w.slip_angle_rad.powi(2)).sqrt() * 2.0;
+                if self.show_skids {
+                    let strength = severity.min(1.0);
                     self.skid_segments.push(SkidSegment {
                         p0: self.last_wheel_world[i],
                         p1: wheel_world[i],

@@ -31,9 +31,6 @@ pub struct App {
     pub skid_segments: Vec<SkidSegment>,
     pub skid_ttl: f32,
     pub show_skids: bool,
-    pub slip_ratio_threshold: f32,
-    pub slip_angle_threshold: f32,
-    pub min_speed_for_skid_kmh: f32,
 
     pub last_wheel_world: [Vec2; 4],
     pub have_last_wheel_world: bool,

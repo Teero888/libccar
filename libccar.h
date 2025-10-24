@@ -1132,7 +1132,7 @@ static void lcc__tire_stiffness(const lcc_tire_desc_t *td, float fz, float tire_
   p_ratio       = lcc__clampf(p_ratio, 0.6f, 1.4f);
   float base    = fmaxf(fz, 100.0f);
   float w_scale = lcc__clampf((tire_width_m > 0.0f) ? (tire_width_m / 0.22f) : 1.0f, 0.6f, 1.6f);
-  float Cx      = 12.0f * base * p_ratio * w_scale;
+  float Cx      = 150.0f * base * p_ratio * w_scale;
   float Cy      = 16.0f * base * p_ratio * w_scale;
   if(Cx_out) *Cx_out = Cx;
   if(Cy_out) *Cy_out = Cy;
