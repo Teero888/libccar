@@ -35,6 +35,11 @@ jobs:
           ndk-version: r26d
           add-to-path: true
 
+      - name: Install LLVM and Clang
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: '18'
+
       - name: Install x-build
         run: cargo install xbuild
 
