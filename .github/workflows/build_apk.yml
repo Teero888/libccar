@@ -47,10 +47,18 @@ jobs:
             ~/.cargo/git/
           key: ${{ runner.os }}-cargo-android-${{ hashFiles('car_demo/Cargo.lock') }}
 
+      - name: Decode Keystore
+        run: |
+          echo "${{ secrets.RELEASE_KEYSTORE_BASE64 }}" | base64 --decode > ${{ github.workspace }}/release.keystore
+
       - name: Build release APK
         working-directory: car_demo
         env:
           NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          CARGO_APK_RELEASE_SIGNING_PATH: ${{ github.workspace }}/release.keystore
+          CARGO_APK_RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          CARGO_APK_RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          CARGO_APK_RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: cargo apk build --release
 
       - name: Upload APK as artifact

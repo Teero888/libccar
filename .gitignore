@@ -8,3 +8,5 @@ perf.*
 *.out
 .vscode
 *.diff
+*.keystore
+*.base64
