@@ -230,6 +230,11 @@ impl App {
             tracks, // Use the initialized tracks
             selected_track: selected_track_idx,
             lap_times: Vec::new(),
+            best_lap_time: None,
+            previous_lap_time: None,
+            best_lap_checkpoints: Vec::new(),
+            current_lap_checkpoints: Vec::new(),
+            checkpoint_delta: None,
             lap_start_time: None,
             current_checkpoint: 0,
             last_pos: Vec2::ZERO, // Will be set by set_initial_car_pos indirectly
@@ -276,9 +281,10 @@ impl App {
         self.path_trace.clear();
         self.skid_segments.clear();
         self.have_last_wheel_world = false;
-        self.lap_times.clear();
         self.lap_start_time = None;
         self.current_checkpoint = 0;
+        self.current_lap_checkpoints.clear();
+        self.checkpoint_delta = None;
         self.center_camera_on_car();
         self.last_pos = self.world_pos();
         self.have_last_pos = true;

@@ -50,6 +50,11 @@ pub struct App {
     pub tracks: Vec<Track>,
     pub selected_track: usize, // 0 = "None"
     pub lap_times: Vec<f32>,
+    pub best_lap_time: Option<f32>,
+    pub previous_lap_time: Option<f32>,
+    pub best_lap_checkpoints: Vec<f32>,
+    pub current_lap_checkpoints: Vec<f32>,
+    pub checkpoint_delta: Option<(String, Instant)>,
     pub lap_start_time: Option<Instant>,
     pub current_checkpoint: usize,
     pub last_pos: Vec2,
@@ -81,6 +86,8 @@ impl App {
                 // Crossed start line, begin timing
                 self.lap_start_time = Some(Instant::now());
                 self.current_checkpoint = 0;
+                self.current_lap_checkpoints.clear();
+                self.checkpoint_delta = None;
             }
             return;
         }
@@ -90,6 +97,16 @@ impl App {
         if next_checkpoint_idx < track.checkpoints.len() {
             let cp = track.checkpoints[next_checkpoint_idx];
             if crate::util::line_segments_intersect(p0, p1, cp.0, cp.1) {
+                let elapsed = self.lap_start_time.unwrap().elapsed().as_secs_f32();
+                self.current_lap_checkpoints.push(elapsed);
+
+                // Check for delta
+                if let Some(best_split) = self.best_lap_checkpoints.get(next_checkpoint_idx) {
+                    let delta = elapsed - best_split;
+                    let delta_str = format!("{:+.2}s", delta);
+                    self.checkpoint_delta = Some((delta_str, Instant::now()));
+                }
+
                 // Hit the next checkpoint
                 self.current_checkpoint += 1;
             }
@@ -101,14 +118,36 @@ impl App {
                 track.start_finish.0,
                 track.start_finish.1,
             ) {
+                let mut lap_delta_set = false;
                 // Lap complete!
                 if let Some(start) = self.lap_start_time {
                     let duration = start.elapsed().as_secs_f32();
+                    self.previous_lap_time = Some(duration);
                     self.lap_times.push(duration);
+                    let old_best = self.best_lap_time;
+                    // Check for new best
+                    let new_best = old_best.map_or(true, |best| duration < best);
+                    if new_best {
+                        self.best_lap_time = Some(duration);
+                        // Save the splits from this lap as the new best
+                        self.best_lap_checkpoints = self.current_lap_checkpoints.clone();
+                    }
+                    // Calculate and show delta to best lap (if a best lap existed)
+                    if let Some(best) = old_best {
+                        let delta = duration - best;
+                        let delta_str = format!("{:+.2}s", delta);
+                        self.checkpoint_delta = Some((delta_str, Instant::now()));
+                        lap_delta_set = true;
+                    }
                 }
+
                 // Start new lap
                 self.lap_start_time = Some(Instant::now());
                 self.current_checkpoint = 0;
+                self.current_lap_checkpoints.clear();
+                if !lap_delta_set {
+                    self.checkpoint_delta = None;
+                }
             }
         }
     }

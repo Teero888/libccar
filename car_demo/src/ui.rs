@@ -601,7 +601,7 @@ impl App {
         }
 
         ui.separator();
-        ui.collapsing("Lap Times", |ui| {
+        ui.collapsing("Lap Times (Side Panel)", |ui| {
             if self.selected_track == 0 {
                 ui.label("Select a track to start timing.");
             } else {
@@ -651,6 +651,11 @@ impl App {
                     self.lap_times.clear();
                     self.lap_start_time = None;
                     self.current_checkpoint = 0;
+                    self.best_lap_time = None;
+                    self.previous_lap_time = None;
+                    self.best_lap_checkpoints.clear();
+                    self.current_lap_checkpoints.clear();
+                    self.checkpoint_delta = None;
                 }
             }
         });
@@ -873,21 +878,29 @@ impl App {
             });
     }
 
-    pub fn draw_hud(&self, ui: &mut egui::Ui) {
+    pub fn draw_hud(&mut self, ui: &mut egui::Ui) {
         let r = ui.available_rect_before_wrap();
         let painter = ui.painter_at(r);
-        let origin = Pos2::new(r.left() + 130.0, r.top() + 130.0);
+
+        // *** Gauges ***
+        let rpm_origin = Pos2::new(r.left() + 100.0, r.top() + 130.0);
+        let speed_origin = Pos2::new(rpm_origin.x + 150.0, rpm_origin.y);
 
         unsafe {
             let car = self.car_ref();
             let es = &car.engine_state;
             let ts = &car.trans_state;
+            let cs = &car.car_state;
 
             let rpm = es.rpm;
             let redline = self.desc.engine.redline_rpm.max(1.0);
-            draw_rpm_gauge(&painter, origin, rpm, redline);
+            draw_rpm_gauge(&painter, rpm_origin, rpm, redline);
 
-            let tb_origin = Pos2::new(origin.x + 160.0, origin.y - 60.0);
+            let speed_kmh = cs.speed_mps * 3.6;
+            draw_speed_gauge(&painter, speed_origin, speed_kmh, 300.0); // 300 km/h max
+
+            // *** Bars ***
+            let tb_origin = Pos2::new(speed_origin.x + 140.0, speed_origin.y - 60.0);
             draw_bar(
                 &painter,
                 tb_origin,
@@ -923,35 +936,36 @@ impl App {
                 (self.controls.steer + 1.0) / 2.0,
                 Color32::YELLOW,
             );
+            let cap = self.desc.fuel.tank_capacity_l.max(1.0);
+            let lvl = car.fuel_state.fuel_l;
+            draw_bar(
+                &painter,
+                Pos2::new(tb_origin.x, tb_origin.y + 120.0),
+                "Fuel",
+                (lvl / cap).clamp(0.0, 1.0),
+                Color32::from_rgb(200, 180, 60),
+            );
 
+            // *** Gear ***
             let gear = ts.gear_index;
             let gtxt = if gear == 0 {
                 "R".to_string()
             } else if gear == 1 {
                 "N".to_string()
             } else {
-                format!("{}", gear - 1)
+                (gear - 1).to_string()
             };
+            let gear_pos = Pos2::new(rpm_origin.x + 75.0, rpm_origin.y + 90.0);
             painter.text(
-                Pos2::new(origin.x - 60.0, origin.y + 70.0),
+                gear_pos,
                 Align2::CENTER_CENTER,
                 format!("Gear {}", gtxt),
                 egui::FontId::proportional(18.0),
                 Color32::WHITE,
             );
 
-            let base2 = Pos2::new(origin.x + 160.0, origin.y + 50.0);
-            let cap = self.desc.fuel.tank_capacity_l;
-            let lvl = car.fuel_state.fuel_l;
-            draw_bar(
-                &painter,
-                Pos2::new(base2.x, base2.y + 24.0),
-                "Fuel",
-                (lvl / cap).clamp(0.0, 1.0),
-                Color32::from_rgb(200, 180, 60),
-            );
-
-            let base = Pos2::new(origin.x + 320.0, origin.y - 80.0);
+            // *** Wheel Info ***
+            let base = Pos2::new(tb_origin.x + 175.0, tb_origin.y + 30.0);
             let labels = ["FL", "FR", "RL", "RR"];
             for i in 0..4 {
                 let w = &car.wheel_states[i];
@@ -961,6 +975,90 @@ impl App {
                     labels[i],
                     w,
                 );
+            }
+        }
+
+        // *** Lap Time HUD ***
+        if self.selected_track > 0 {
+            // ** Top Center: Current Lap Time **
+            let center_top = Pos2::new(r.center().x, r.top() + 40.0);
+            let current_lap_time = self.lap_start_time.map_or(0.0, |start| {
+                if self.paused {
+                    // This isn't perfect, but prevents timer from running while paused
+                    // A better way would be to track pause duration, but this is ok
+                    0.0 // Or store the "paused_at" time
+                } else {
+                    start.elapsed().as_secs_f32()
+                }
+            });
+
+            let (mins, secs) = ((current_lap_time / 60.0) as u32, current_lap_time % 60.0);
+            let time_str = if self.lap_start_time.is_some() {
+                format!("{}:{:05.2}", mins, secs)
+            } else {
+                "--:--.--".to_string()
+            };
+
+            painter.text(
+                center_top,
+                Align2::CENTER_CENTER,
+                time_str,
+                egui::FontId::monospace(32.0),
+                Color32::WHITE,
+            );
+
+            // ** Top Right: Best/Previous Lap Times **
+            let top_right = Pos2::new(r.right() - 20.0, r.top() + 40.0);
+            let best_str = self
+                .best_lap_time
+                .map_or("Best: --:--.--".to_string(), |t| {
+                    format!("Best: {}:{:05.2}", (t / 60.0) as u32, t % 60.0)
+                });
+            let prev_str = self
+                .previous_lap_time
+                .map_or("Prev: --:--.--".to_string(), |t| {
+                    format!("Prev: {}:{:05.2}", (t / 60.0) as u32, t % 60.0)
+                });
+
+            painter.text(
+                top_right,
+                Align2::RIGHT_TOP,
+                best_str,
+                egui::FontId::monospace(20.0),
+                Color32::LIGHT_YELLOW,
+            );
+            painter.text(
+                Pos2::new(top_right.x, top_right.y + 24.0),
+                Align2::RIGHT_TOP,
+                prev_str,
+                egui::FontId::monospace(20.0),
+                Color32::GRAY,
+            );
+
+            // ** Center: Checkpoint Delta (Fade out) **
+            let checkpoint_fade_time = 2.0; // seconds
+            if let Some((text, time)) = &self.checkpoint_delta {
+                let elapsed = time.elapsed().as_secs_f32();
+                if elapsed < checkpoint_fade_time {
+                    let alpha = (1.0 - (elapsed / checkpoint_fade_time)).powf(0.5);
+                    let color = if text.starts_with('-') {
+                        Color32::LIGHT_GREEN
+                    } else {
+                        Color32::LIGHT_RED
+                    };
+                    let color = color.linear_multiply(alpha);
+                    let pos = Pos2::new(r.center().x, r.top() + 80.0); // Below main timer
+                    painter.text(
+                        pos,
+                        Align2::CENTER_CENTER,
+                        text,
+                        egui::FontId::monospace(24.0),
+                        color,
+                    );
+                } else {
+                    // Mutable borrow here
+                    self.checkpoint_delta = None;
+                }
             }
         }
     }
@@ -1143,6 +1241,73 @@ fn draw_rpm_gauge(painter: &egui::Painter, origin: Pos2, rpm: f32, redline: f32)
         format!("Redline: {:.0}", redline),
         egui::FontId::proportional(12.0),
         Color32::from_gray(180),
+    );
+}
+
+fn draw_speed_gauge(painter: &egui::Painter, origin: Pos2, kmh: f32, max_kmh: f32) {
+    let radius = 60.0;
+    let bg = Color32::from_gray(40);
+
+    painter.circle(
+        origin,
+        radius,
+        Color32::from_black_alpha(10),
+        Stroke::new(2.0, bg),
+    );
+
+    let start_angle = -0.75 * PI;
+    let end_angle = 0.75 * PI;
+
+    let arc = |from_t: f32, to_t: f32, col: Color32, width: f32| {
+        let steps = 32;
+        let mut pts = Vec::with_capacity(steps + 1);
+        for i in 0..=steps {
+            let tt = lerp(from_t, to_t, i as f32 / steps as f32);
+            let ang = start_angle + (end_angle - start_angle) * tt;
+            let r = radius - 4.0;
+            pts.push(Pos2::new(
+                origin.x + r * ang.cos(),
+                origin.y + r * ang.sin(),
+            ));
+        }
+        painter.add(egui::Shape::line(pts, Stroke::new(width, col)));
+    };
+
+    // Background arc
+    arc(0.0, 1.0, Color32::from_gray(60), 5.0);
+
+    // Ticks
+    let num_ticks = 10; // e.g., 0, 30, 60, ... 300
+    for i in 0..=num_ticks {
+        let t = i as f32 / num_ticks as f32;
+        let ang = start_angle + (end_angle - start_angle) * t;
+        let r0 = radius - 2.0;
+        let r1 = if i % 2 == 0 {
+            radius - 12.0
+        } else {
+            radius - 8.0
+        };
+        let p0 = Pos2::new(origin.x + r0 * ang.cos(), origin.y + r0 * ang.sin());
+        let p1 = Pos2::new(origin.x + r1 * ang.cos(), origin.y + r1 * ang.sin());
+        painter.line_segment([p0, p1], Stroke::new(2.0, Color32::from_gray(120)));
+    }
+
+    let t = (kmh / max_kmh).clamp(0.0, 1.0);
+    let needle_angle = start_angle + (end_angle - start_angle) * t;
+    let needle_len = radius * 0.9;
+    let tip = Pos2::new(
+        origin.x + needle_len * needle_angle.cos(),
+        origin.y + needle_len * needle_angle.sin(),
+    );
+    painter.line_segment([origin, tip], Stroke::new(3.0, Color32::LIGHT_GREEN));
+
+    let label = format!("{:6.1} km/h", kmh);
+    painter.text(
+        Pos2::new(origin.x, origin.y + radius + 14.0),
+        Align2::CENTER_CENTER,
+        label,
+        egui::FontId::proportional(14.0),
+        Color32::WHITE,
     );
 }
 
