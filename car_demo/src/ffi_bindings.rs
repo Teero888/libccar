@@ -9,6 +9,10 @@ pub mod ffi {
 // Re-export common FFI aliases for easier use in other modules
 pub use self::ffi::{
     lcc_abs_mode_e_LCC_ABS_OFF as LCC_ABS_OFF, lcc_abs_mode_e_LCC_ABS_ON as LCC_ABS_ON,
+    lcc_auto_mode_e_LCC_AUTO_DRIVE as LCC_AUTO_DRIVE,
+    lcc_auto_mode_e_LCC_AUTO_NEUTRAL as LCC_AUTO_NEUTRAL,
+    lcc_auto_mode_e_LCC_AUTO_PARK as LCC_AUTO_PARK,
+    lcc_auto_mode_e_LCC_AUTO_REVERSE as LCC_AUTO_REVERSE,
     lcc_drivetrain_layout_e_LCC_LAYOUT_AWD as LCC_LAYOUT_AWD,
     lcc_drivetrain_layout_e_LCC_LAYOUT_FWD as LCC_LAYOUT_FWD,
     lcc_drivetrain_layout_e_LCC_LAYOUT_RWD as LCC_LAYOUT_RWD,

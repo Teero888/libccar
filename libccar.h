@@ -151,6 +151,9 @@ typedef enum lcc_tc_mode_e { LCC_TC_OFF = 0, LCC_TC_ON = 1 } lcc_tc_mode_t;
 
 typedef enum lcc_esc_mode_e { LCC_ESC_OFF = 0, LCC_ESC_ON = 1 } lcc_esc_mode_t;
 
+/* automatic transmission modes */
+typedef enum lcc_auto_mode_e { LCC_AUTO_PARK = 0, LCC_AUTO_REVERSE = 1, LCC_AUTO_NEUTRAL = 2, LCC_AUTO_DRIVE = 3 } lcc_auto_mode_t;
+
 /*}}}*/
 
 /* ============================== types ============================== {{{*/
@@ -286,7 +289,6 @@ typedef struct {
   lcc_abs_mode_t abs_mode;
   lcc_tc_mode_t  tc_mode;
   lcc_esc_mode_t esc_mode;
-  lcc_bool_t     auto_clutch;
   lcc_bool_t     idle_control;
   float          idle_pid_p, idle_pid_i;
 } lcc_ecu_desc_t;
@@ -392,6 +394,8 @@ typedef struct {
 
   lcc_bool_t ignition_switch;
   lcc_bool_t starter;
+
+  int gear_request; /* 0=none, 1=up, -1=down */
 } lcc_controls_t;
 
 /* states */
@@ -415,9 +419,10 @@ typedef struct {
 } lcc_engine_state_t;
 
 typedef struct {
-  int        gear_index;
-  float      clutch_engagement;
-  lcc_bool_t shifting;
+  int               gear_index;
+  float             clutch_engagement;
+  lcc_bool_t        shifting;
+  lcc_auto_mode_t   auto_mode;
 } lcc_transmission_state_t;
 
 typedef struct {
@@ -491,6 +496,10 @@ typedef struct {
   float shift_timer_s;
   int   pending_gear_index;
   int   wanted_gear_index;
+
+  int last_gear_request;
+
+  float auto_shift_lockout_s;
 
   /* aids internal state TODO: refactor this, this is bad lol? */
   float abs_mod[LCC_MAX_WHEELS];
@@ -575,9 +584,6 @@ LCC_API lcc_result_t lcc_car_set_arb_params(lcc_car_t *car, const lcc_arb_desc_t
 LCC_API lcc_result_t lcc_car_set_steering_params(lcc_car_t *car, const lcc_steering_desc_t *steer);
 
 /* powertrain controls */
-LCC_API lcc_result_t lcc_car_request_gear(lcc_car_t *car, int gear_index);
-LCC_API lcc_result_t lcc_car_shift_up(lcc_car_t *car);
-LCC_API lcc_result_t lcc_car_shift_down(lcc_car_t *car);
 
 /* fuel and energy management */
 LCC_API lcc_result_t lcc_car_refuel(lcc_car_t *car, float liters);
@@ -1043,10 +1049,13 @@ static void lcc__init_runtime(lcc_car_t *car) {
   car->trans_state.gear_index        = 1; /* start in neutral */
   car->trans_state.clutch_engagement = 1.0f;
   car->trans_state.shifting          = 0;
+  car->trans_state.auto_mode         = LCC_AUTO_PARK;
 
   car->shift_timer_s      = 0.0f;
   car->pending_gear_index = car->trans_state.gear_index;
   car->wanted_gear_index  = car->trans_state.gear_index;
+  car->last_gear_request = 0;
+  car->auto_shift_lockout_s = 0.0f;
 
   for(int i = 0; i < car->wheel_count; ++i) {
     car->damage_state.brake_health[i] = 1.0f;
@@ -1556,22 +1565,70 @@ static lcc_result_t lcc__car_step(lcc_car_t *car, float dt_s) {
 
   car->car_state.time_s += (double)dt_s;
 
-  /* auto gearbox simple logic */
-  if(car->desc.transmission.type != LCC_TRANS_MANUAL && !car->trans_state.shifting) {
-    if(car->engine_state.rpm > car->desc.transmission.auto_upshift_rpm) lcc_car_shift_up(car);
-    else if(car->engine_state.rpm < car->desc.transmission.auto_downshift_rpm)
-      lcc_car_shift_down(car);
+  /* gear shifting state machine */
+  if (car->controls.gear_request != 0 && car->last_gear_request == 0) {
+    if (car->desc.transmission.type == LCC_TRANS_MANUAL) {
+      int next_gear = car->wanted_gear_index + car->controls.gear_request;
+      if (next_gear >= 0 && next_gear < car->desc.transmission.gear_count) {
+        car->wanted_gear_index = next_gear;
+      }
+    } else {
+      int current_mode = car->trans_state.auto_mode;
+      int next_mode = current_mode + car->controls.gear_request;
+      if (next_mode < LCC_AUTO_PARK) next_mode = LCC_AUTO_PARK;
+      if (next_mode > LCC_AUTO_DRIVE) next_mode = LCC_AUTO_DRIVE;
+      car->trans_state.auto_mode = (lcc_auto_mode_t)next_mode;
+    }
+  }
+  car->last_gear_request = car->controls.gear_request;
+
+  /* auto transmission mode logic */
+  if (car->desc.transmission.type != LCC_TRANS_MANUAL) {
+    switch (car->trans_state.auto_mode) {
+      case LCC_AUTO_PARK:
+        car->wanted_gear_index = LCC_GEAR_NEUTRAL;
+        break;
+      case LCC_AUTO_REVERSE:
+        car->wanted_gear_index = LCC_GEAR_REVERSE;
+        break;
+      case LCC_AUTO_NEUTRAL:
+        car->wanted_gear_index = LCC_GEAR_NEUTRAL;
+        break;
+      case LCC_AUTO_DRIVE:
+        if (car->trans_state.gear_index < 2) { // If not in a forward gear, shift to 1st (index 2)
+          car->wanted_gear_index = 2;
+        }
+        break;
+    }
   }
 
   /* clutch engagement: 1 = engaged */
-  float clutch_cmd = car->trans_state.gear_index != LCC_GEAR_NEUTRAL ? 1.0f - car->controls.clutch : 0.0f;
-  if(car->desc.ecu.auto_clutch && car->trans_state.shifting) {
-    float half  = 0.5f * fmaxf(0.05f, car->desc.transmission.shift_time_s);
-    float t     = car->shift_timer_s;
-    float phase = (t > half) ? 0.0f : (1.0f - t / fmaxf(1e-3f, half));
-    clutch_cmd  = 1.0f - 0.9f * phase;
+  float clutch_engagement_target = 1.0f;
+
+  if (car->desc.transmission.type == LCC_TRANS_MANUAL) {
+      if (car->trans_state.gear_index == LCC_GEAR_NEUTRAL) {
+          clutch_engagement_target = 0.0f;
+      } else {
+          clutch_engagement_target = 1.0f - car->controls.clutch;
+      }
+  } else {
+      if (car->trans_state.shifting) {
+          float total_time = fmaxf(0.05f, car->desc.transmission.shift_time_s);
+          float phase = 1.0f - 2.0f * fabsf(car->shift_timer_s / total_time - 0.5f);
+          clutch_engagement_target = 1.0f - lcc__saturate(phase);
+      } else if (car->trans_state.auto_mode == LCC_AUTO_PARK || car->trans_state.auto_mode == LCC_AUTO_NEUTRAL) {
+          clutch_engagement_target = 0.0f;
+      } else {
+          float idle_rpm = car->desc.engine.idle_rpm;
+          float stall_rpm = car->desc.engine.stall_rpm;
+          float lockup_rpm = idle_rpm + 1000.0f;
+          float engagement = lcc__saturate((car->engine_state.rpm - stall_rpm) / (lockup_rpm - stall_rpm));
+          clutch_engagement_target = lcc__smoothstep2(engagement);
+      }
   }
-  car->trans_state.clutch_engagement = lcc__clampf(clutch_cmd, 0.0f, 1.0f);
+
+  car->trans_state.clutch_engagement = lcc__lerp(car->trans_state.clutch_engagement, clutch_engagement_target, 15.0f * dt_s);
+  car->trans_state.clutch_engagement = lcc__clampf(car->trans_state.clutch_engagement, 0.0f, 1.0f);
 
   /* steering */
   lcc__apply_steering(car);
@@ -1602,6 +1659,55 @@ static lcc_result_t lcc__car_step(lcc_car_t *car, float dt_s) {
   }
   float avg_omega     = (count_driven > 0) ? (sum_omega_driven / (float)count_driven) : 0.0f;
   float shaft_out_rpm = lcc__radps_to_rpm(avg_omega) * fmaxf(0.1f, final_drive);
+
+  if (car->auto_shift_lockout_s > 0.0f) {
+    car->auto_shift_lockout_s -= dt_s;
+  }
+
+  /* auto gearbox dynamic shifting logic - speed/throttle map based */
+  if(car->desc.transmission.type != LCC_TRANS_MANUAL && car->trans_state.auto_mode == LCC_AUTO_DRIVE && !car->trans_state.shifting && car->auto_shift_lockout_s <= 0.0f) {
+    float throttle = car->controls.throttle;
+    int current_gear = car->trans_state.gear_index;
+    int gear_count = car->desc.transmission.gear_count;
+    int first_drive_gear = 2;
+
+    // Use output shaft speed as the primary variable for shift decisions
+    float shaft_rpm = shaft_out_rpm;
+
+    // --- Upshift Check ---
+    if (current_gear < gear_count - 1) {
+        float current_gear_ratio = car->desc.transmission.gear_ratios[current_gear];
+        if (current_gear_ratio > 1e-3f) {
+            // Base upshift speed is when we hit auto_upshift_rpm in the current gear.
+            float upshift_speed_base = car->desc.transmission.auto_upshift_rpm / current_gear_ratio;
+            // At higher throttle, we shift at a higher speed.
+            float upshift_speed = upshift_speed_base * (1.0f + 0.3f * throttle);
+
+            if (shaft_rpm > upshift_speed) {
+                car->wanted_gear_index = current_gear + 1;
+                car->auto_shift_lockout_s = 0.5f;
+            }
+        }
+    }
+
+    // --- Downshift Check ---
+    if (car->wanted_gear_index == current_gear && current_gear > first_drive_gear) {
+        float lower_gear_ratio = car->desc.transmission.gear_ratios[current_gear - 1];
+        if (lower_gear_ratio > 1e-3f) {
+            // Base downshift speed is when we would be at auto_downshift_rpm in the *lower* gear.
+            float downshift_speed_base = car->desc.transmission.auto_downshift_rpm / lower_gear_ratio;
+            
+            // Kickdown: at high throttle, increase the speed at which we downshift.
+            float kickdown_factor = lcc__saturate((throttle - 0.8f) / 0.2f);
+            float downshift_speed = downshift_speed_base * (1.0f + 0.8f * kickdown_factor);
+
+            if (shaft_rpm < downshift_speed) {
+                car->wanted_gear_index = current_gear - 1;
+                car->auto_shift_lockout_s = 0.5f;
+            }
+        }
+    }
+  }
 
   /* engine model */
   const lcc_engine_desc_t *ed             = &car->desc.engine;
@@ -1917,6 +2023,10 @@ static lcc_result_t lcc__car_step(lcc_car_t *car, float dt_s) {
     float Tbr      = Tbr_base + car->esc_extra_brake[i];
     Tbr            = lcc__abs_apply(car, i, Tbr, s, dt_s);
 
+    if (car->desc.transmission.type != LCC_TRANS_MANUAL && car->trans_state.auto_mode == LCC_AUTO_PARK && wd->driven) {
+      Tbr += 10000.0f; // Park lock torque
+    }
+
     float Tbr_sign = lcc__signf(ws->omega_radps);
 
     /* contact patch torque from longitudinal */
@@ -2231,9 +2341,6 @@ void lcc_ecu_desc_init_defaults(lcc_ecu_desc_t *desc) {
   desc->tc_mode  = LCC_TC_ON;
   desc->esc_mode = LCC_ESC_ON;
 
-  /* TODO: this only in automatic transmission? could be completely removed */
-  desc->auto_clutch = 0;
-
   desc->idle_control = 1;
   desc->idle_pid_p   = 0.5f;
   desc->idle_pid_i   = 0.1f;
@@ -2258,8 +2365,8 @@ void lcc_transmission_desc_init_defaults(lcc_transmission_desc_t *desc) {
   for(int i = 0; i < desc->gear_count; ++i) desc->gear_ratios[i] = gr[i];
   desc->final_drive_ratio  = 3.9f;
   desc->shift_time_s       = 0.10f;
-  desc->auto_upshift_rpm   = 6500.0f;
-  desc->auto_downshift_rpm = 1200.0f;
+  desc->auto_upshift_rpm   = 5800.0f;
+  desc->auto_downshift_rpm = 2000.0f;
 }
 
 void lcc_driveline_desc_init_defaults(lcc_driveline_desc_t *desc) {
@@ -2539,28 +2646,6 @@ lcc_result_t lcc_car_set_steering_params(lcc_car_t *car, const lcc_steering_desc
   if(!car || !steer) return LCC_ERR_INVALID_ARG;
   car->desc.steering = *steer;
   return LCC_OK;
-}
-
-lcc_result_t lcc_car_request_gear(lcc_car_t *car, int gear_index) {
-  if(!car) return LCC_ERR_INVALID_ARG;
-  if(gear_index < 0 || gear_index >= car->desc.transmission.gear_count) return LCC_ERR_BOUNDS;
-  car->wanted_gear_index = gear_index;
-  return LCC_OK;
-}
-
-lcc_result_t lcc_car_shift_up(lcc_car_t *car) {
-  if(!car) return LCC_ERR_INVALID_ARG;
-  int next = car->wanted_gear_index + 1;
-  if(next >= car->desc.transmission.gear_count) return LCC_ERR_BOUNDS;
-  return lcc_car_request_gear(car, next);
-}
-
-lcc_result_t lcc_car_shift_down(lcc_car_t *car) {
-  if(!car) return LCC_ERR_INVALID_ARG;
-  int next     = car->wanted_gear_index - 1;
-  int min_gear = car->desc.transmission.type != LCC_TRANS_MANUAL ? 2 : 0;
-  if(next < min_gear) return LCC_ERR_BOUNDS;
-  return lcc_car_request_gear(car, next);
 }
 
 /* fuel and energy */

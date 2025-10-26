@@ -138,14 +138,13 @@ impl App {
         let w = input.key_pressed(egui::Key::W);
         let s = input.key_pressed(egui::Key::S);
 
-        if (w || shift_up_pressed) && !self.input.last_w {
-            let _ = ffi::lcc_car_shift_up(self.car);
+        self.controls.gear_request = 0;
+        if w || shift_up_pressed {
+            self.controls.gear_request = 1;
         }
-        if (s || shift_down_pressed) && !self.input.last_s {
-            let _ = ffi::lcc_car_shift_down(self.car);
+        if s || shift_down_pressed {
+            self.controls.gear_request = -1;
         }
-        self.input.last_w = w || shift_up_pressed;
-        self.input.last_s = s || shift_down_pressed;
 
         // starter (space) + ignition on: Combine gamepad and keyboard
         self.controls.ignition_switch = 1;

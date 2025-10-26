@@ -406,7 +406,7 @@ impl App {
             throttle: self.controls.throttle,
             brake: self.controls.brake,
             steering: self.controls.steer,
-            clutch: self.controls.clutch,
+            clutch: 1.0 - ts.clutch_engagement, // Use actual state, inverted for display
             handbrake: self.controls.handbrake,
 
             abs_on: self.abs_on,

@@ -2,8 +2,9 @@ use crate::{
     app::App,
     config::ViewPreset,
     ffi_bindings::{
-        ffi, LCC_ABS_OFF, LCC_ABS_ON, LCC_ESC_OFF, LCC_ESC_ON, LCC_LAYOUT_AWD, LCC_LAYOUT_FWD,
-        LCC_LAYOUT_RWD, LCC_TC_OFF, LCC_TC_ON, VERSION,
+        ffi, LCC_ABS_OFF, LCC_ABS_ON, LCC_AUTO_DRIVE, LCC_AUTO_NEUTRAL, LCC_AUTO_PARK,
+        LCC_AUTO_REVERSE, LCC_ESC_OFF, LCC_ESC_ON, LCC_LAYOUT_AWD, LCC_LAYOUT_FWD, LCC_LAYOUT_RWD,
+        LCC_TC_OFF, LCC_TC_ON, LCC_TRANS_MANUAL, VERSION,
     },
     util::{lerp, to_screen_point},
 };
@@ -926,7 +927,7 @@ impl App {
                 &painter,
                 Pos2::new(tb_origin.x, tb_origin.y + 72.0),
                 "Clutch",
-                self.controls.clutch,
+                1.0 - ts.clutch_engagement, // Use actual state, inverted for display
                 Color32::LIGHT_BLUE,
             );
             draw_bar(
@@ -948,19 +949,34 @@ impl App {
 
             // *** Gear ***
             let gear = ts.gear_index;
-            let gtxt = if gear == 0 {
+            let is_auto = self.desc.transmission.type_ != LCC_TRANS_MANUAL;
+            let gtxt = if is_auto {
+                match ts.auto_mode as u32 {
+                    LCC_AUTO_PARK => "P".to_string(),
+                    LCC_AUTO_REVERSE => "R".to_string(),
+                    LCC_AUTO_NEUTRAL => "N".to_string(),
+                    LCC_AUTO_DRIVE => {
+                        if gear > 1 {
+                            format!("D{}", gear - 1)
+                        } else {
+                            "D".to_string()
+                        }
+                    }
+                    _ => "?".to_string(),
+                }
+            } else if gear == 0 {
                 "R".to_string()
             } else if gear == 1 {
                 "N".to_string()
             } else {
                 (gear - 1).to_string()
             };
-            let gear_pos = Pos2::new(rpm_origin.x + 75.0, rpm_origin.y + 90.0);
+            let gear_pos = Pos2::new(rpm_origin.x + 75.0, rpm_origin.y + 70.0);
             painter.text(
                 gear_pos,
                 Align2::CENTER_CENTER,
-                format!("Gear {}", gtxt),
-                egui::FontId::proportional(18.0),
+                format!("{}", gtxt),
+                egui::FontId::proportional(26.0),
                 Color32::WHITE,
             );
 
