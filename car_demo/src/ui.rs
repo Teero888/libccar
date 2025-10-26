@@ -15,7 +15,7 @@ use eframe::{
 use egui_extras::{Size, StripBuilder};
 use egui_plot::{HLine, Legend, Line, Plot, PlotPoints};
 use glam::{Mat2, Vec2};
-use std::{f32::consts::PI, time::Instant};
+use std::f32::consts::PI;
 
 #[derive(Clone, Copy)]
 pub struct SkidSegment {
@@ -23,15 +23,15 @@ pub struct SkidSegment {
     pub p1: Vec2,
     pub strength: f32,
     pub ttl: f32,
+    pub width: f32,
 }
 
 pub struct Plots {
-    pub rpm: Vec<(f32, f32)>,
-    pub speed: Vec<(f32, f32)>,
-    pub wheel_omega: [Vec<(f32, f32)>; 4],
-    pub slip_ratios: [Vec<(f32, f32)>; 4],
-    pub yaw_rate: Vec<(f32, f32)>,
-    pub start_time: Instant,
+    pub rpm: Vec<(f64, f32)>,
+    pub speed: Vec<(f64, f32)>,
+    pub wheel_omega: [Vec<(f64, f32)>; 4],
+    pub slip_ratios: [Vec<(f64, f32)>; 4],
+    pub yaw_rate: Vec<(f64, f32)>,
     pub max_len: usize,
 }
 impl Plots {
@@ -42,22 +42,18 @@ impl Plots {
             wheel_omega: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
             slip_ratios: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
             yaw_rate: Vec::new(),
-            start_time: Instant::now(),
             max_len: 3000,
         }
     }
-    pub fn t(&self) -> f32 {
-        (Instant::now() - self.start_time).as_secs_f32()
-    }
     pub fn push(
         &mut self,
+        t: f64,
         rpm: f32,
         speed_kmh: f32,
         omega: [f32; 4],
         slip: [f32; 4],
         yaw_rate: f32,
     ) {
-        let t = self.t();
         self.rpm.push((t, rpm));
         self.speed.push((t, speed_kmh));
         self.yaw_rate.push((t, yaw_rate));
@@ -221,7 +217,7 @@ impl App {
             for seg in &self.skid_segments {
                 let life = (seg.ttl / self.skid_ttl).clamp(0.0, 1.0);
                 let alpha = (200.0 * life * seg.strength) as u8;
-                let width = 2.0 + 1.5 * seg.strength;
+                let width = (seg.width * 0.7 * seg.strength * self.zoom).max(1.0);
                 let col = Color32::from_black_alpha(alpha);
                 painter.line_segment(
                     [to_screen(seg.p0), to_screen(seg.p1)],
@@ -270,7 +266,7 @@ impl App {
                     .map(|&w| to_screen_point(w, self.camera_pos, self.zoom, center))
                     .collect(),
                 Color32::from_black_alpha(20),
-                Stroke::new(2.0, Color32::from_rgb(180, 200, 220)),
+                Stroke::new(1.5, Color32::from_rgb(180, 200, 220)),
             ));
 
             for i in 0..4usize {
@@ -291,6 +287,7 @@ impl App {
                     self.desc.wheels[i].radius_m * 2.0,
                     self.desc.wheels[i].width_m,
                     ws,
+                    self.zoom,
                 );
             }
         }
@@ -607,13 +604,7 @@ impl App {
                 ui.label("Select a track to start timing.");
             } else {
                 let track = &self.tracks[self.selected_track - 1];
-                // Show current lap time
-                if let Some(start) = self.lap_start_time {
-                    let current_lap_time = start.elapsed().as_secs_f32();
-                    ui.label(RichText::new(format!("Current: {:.3}s", current_lap_time)).strong());
-                } else {
-                    ui.label("Cross start line to begin...");
-                }
+
                 // Show checkpoint progress
                 ui.label(format!(
                     "Checkpoints: {} / {}",
@@ -651,6 +642,7 @@ impl App {
                 if ui.button("Clear Laps").clicked() {
                     self.lap_times.clear();
                     self.lap_start_time = None;
+                    self.current_lap_time = 0.0;
                     self.current_checkpoint = 0;
                     self.best_lap_time = None;
                     self.previous_lap_time = None;
@@ -799,7 +791,7 @@ impl App {
                                             self.plots
                                                 .rpm
                                                 .iter()
-                                                .map(|&(x, y)| [x as f64, y as f64]),
+                                                .map(|&(x, y)| [x, y as f64]),
                                         );
                                         pui.line(
                                             Line::new("RPM", pts).color(Color32::LIGHT_YELLOW),
@@ -814,7 +806,7 @@ impl App {
                                             self.plots
                                                 .speed
                                                 .iter()
-                                                .map(|&(x, y)| [x as f64, y as f64]),
+                                                .map(|&(x, y)| [x, y as f64]),
                                         );
                                         pui.line(
                                             Line::new("Speed (km/h)", pts)
@@ -841,7 +833,7 @@ impl App {
                                             let pts = PlotPoints::from_iter(
                                                 self.plots.wheel_omega[i]
                                                     .iter()
-                                                    .map(|&(x, y)| [x as f64, y as f64]),
+                                                    .map(|&(x, y)| [x, y as f64]),
                                             );
                                             pui.line(
                                                 Line::new(format!("W{i} ω (rad/s)"), pts)
@@ -864,7 +856,7 @@ impl App {
                                             let pts = PlotPoints::from_iter(
                                                 self.plots.slip_ratios[i]
                                                     .iter()
-                                                    .map(|&(x, y)| [x as f64, y as f64]),
+                                                    .map(|&(x, y)| [x, y as f64]),
                                             );
                                             pui.line(
                                                 Line::new(format!("W{i} slip ratio"), pts)
@@ -998,15 +990,7 @@ impl App {
         if self.selected_track > 0 {
             // ** Top Center: Current Lap Time **
             let center_top = Pos2::new(r.center().x, r.top() + 40.0);
-            let current_lap_time = self.lap_start_time.map_or(0.0, |start| {
-                if self.paused {
-                    // This isn't perfect, but prevents timer from running while paused
-                    // A better way would be to track pause duration, but this is ok
-                    0.0 // Or store the "paused_at" time
-                } else {
-                    start.elapsed().as_secs_f32()
-                }
-            });
+            let current_lap_time = self.current_lap_time;
 
             let (mins, secs) = ((current_lap_time / 60.0) as u32, current_lap_time % 60.0);
             let time_str = if self.lap_start_time.is_some() {
@@ -1082,48 +1066,79 @@ impl App {
 
 fn draw_grid(painter: &Painter, rect: Rect, cam: Vec2, zoom: f32) {
     let grid_color = Color32::from_gray(50);
-    let bold_color = Color32::from_gray(100);
-    let step_world = 1.0;
-    let step = step_world * zoom;
-    let center = rect.center();
+    let bold_color = Color32::from_gray(80);
 
+    const TARGET_STEP_PX: f32 = 80.0;
+    let ideal_step_world = TARGET_STEP_PX / zoom;
+
+    // Get the order of magnitude
+    let power = 10.0_f32.powf(ideal_step_world.log10().floor());
+
+    // Choose from a 1-2-5-10 sequence
+    let steps = [power, 2.0 * power, 5.0 * power, 10.0 * power];
+
+    // Find the step that results in a screen spacing closest to our target
+    let step_world = *steps
+        .iter()
+        .min_by(|a, b| {
+            let da = (*a * zoom - TARGET_STEP_PX).abs();
+            let db = (*b * zoom - TARGET_STEP_PX).abs();
+            da.partial_cmp(&db).unwrap()
+        })
+        .unwrap_or(&power);
+
+    let center = rect.center();
     let to_screen = |w: Vec2| -> Pos2 {
         let rel = w - cam;
         Pos2::new(center.x + rel.x * zoom, center.y - rel.y * zoom)
     };
 
+    // Find the world coordinates visible in the viewport
     let half_w = rect.width() / 2.0;
     let half_h = rect.height() / 2.0;
-    let start_x = -((half_w / step).ceil() as i32);
-    let end_x = (half_w / step).ceil() as i32;
-    let start_y = -((half_h / step).ceil() as i32);
-    let end_y = (half_h / step).ceil() as i32;
+    let world_top_left = cam + Vec2::new(-half_w / zoom, half_h / zoom);
+    let world_bottom_right = cam + Vec2::new(half_w / zoom, -half_h / zoom);
 
+    // Find the range of grid lines to draw
+    let start_x = (world_top_left.x / step_world).floor() as i32;
+    let end_x = (world_bottom_right.x / step_world).ceil() as i32;
+    let start_y = (world_bottom_right.y / step_world).floor() as i32;
+    let end_y = (world_top_left.y / step_world).ceil() as i32;
+
+    // Draw vertical lines
     for gx in start_x..=end_x {
-        let wx = gx as f32 * step_world + cam.x.round();
-        let p0 = to_screen(Vec2::new(wx, cam.y - (end_y as f32 + 1.0)));
-        let p1 = to_screen(Vec2::new(wx, cam.y + (end_y as f32 + 1.0)));
-        let bold = wx.abs() < 0.01;
-        painter.line_segment(
-            [p0, p1],
-            Stroke::new(
-                if bold { 2.0 } else { 1.0 },
-                if bold { bold_color } else { grid_color },
-            ),
-        );
+        let wx = gx as f32 * step_world;
+        let p0 = to_screen(Vec2::new(wx, world_top_left.y));
+        let p1 = to_screen(Vec2::new(wx, world_bottom_right.y));
+
+        let is_origin = gx == 0;
+        let is_major = gx % 10 == 0;
+        let stroke = if is_origin {
+            Stroke::new(1.5, bold_color.gamma_multiply(1.5))
+        } else if is_major {
+            Stroke::new(1.0, bold_color)
+        } else {
+            Stroke::new(1.0, grid_color)
+        };
+        painter.line_segment([p0, p1], stroke);
     }
+
+    // Draw horizontal lines
     for gy in start_y..=end_y {
-        let wy = gy as f32 * step_world + cam.y.round();
-        let p0 = to_screen(Vec2::new(cam.x - (end_x as f32 + 1.0), wy));
-        let p1 = to_screen(Vec2::new(cam.x + (end_x as f32 + 1.0), wy));
-        let bold = wy.abs() < 0.01;
-        painter.line_segment(
-            [p0, p1],
-            Stroke::new(
-                if bold { 2.0 } else { 1.0 },
-                if bold { bold_color } else { grid_color },
-            ),
-        );
+        let wy = gy as f32 * step_world;
+        let p0 = to_screen(Vec2::new(world_top_left.x, wy));
+        let p1 = to_screen(Vec2::new(world_bottom_right.x, wy));
+
+        let is_origin = gy == 0;
+        let is_major = gy % 10 == 0;
+        let stroke = if is_origin {
+            Stroke::new(1.5, bold_color.gamma_multiply(1.5))
+        } else if is_major {
+            Stroke::new(1.0, bold_color)
+        } else {
+            Stroke::new(1.0, grid_color)
+        };
+        painter.line_segment([p0, p1], stroke);
     }
 }
 
@@ -1135,6 +1150,7 @@ unsafe fn draw_wheel_vis(
     length_m: f32,
     width_m: f32,
     w: &ffi::lcc_wheel_state_t,
+    zoom: f32,
 ) {
     let l = length_m;
     let wth = width_m;
@@ -1160,7 +1176,7 @@ unsafe fn draw_wheel_vis(
     painter.add(egui::Shape::convex_polygon(
         pts,
         fill,
-        Stroke::new(1.5, outline),
+        Stroke::new(1.0, outline),
     ));
 
     // slip vectors
@@ -1168,13 +1184,13 @@ unsafe fn draw_wheel_vis(
     let slip_world = center + rot * slip_dir_local * 0.6;
     painter.line_segment(
         [to_screen(center), to_screen(slip_world)],
-        Stroke::new(2.0, Color32::from_rgb(255, 140, 0)),
+        Stroke::new(1.5, Color32::from_rgb(255, 140, 0)),
     );
 
     let long_dir = center + rot * Vec2::new(w.slip_ratio.clamp(-1.5, 1.5), 0.0) * 0.6;
     painter.line_segment(
         [to_screen(center), to_screen(long_dir)],
-        Stroke::new(2.0, Color32::from_rgb(0, 220, 180)),
+        Stroke::new(1.5, Color32::from_rgb(0, 220, 180)),
     );
 
     // heat-ish color dot
@@ -1184,7 +1200,8 @@ unsafe fn draw_wheel_vis(
         180,
         180,
     );
-    painter.circle_filled(to_screen(center), 4.0, color);
+    let radius = (width_m * zoom * 0.2).max(1.5);
+    painter.circle_filled(to_screen(center), radius, color);
 }
 
 fn draw_rpm_gauge(painter: &egui::Painter, origin: Pos2, rpm: f32, redline: f32) {

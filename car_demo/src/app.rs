@@ -55,7 +55,8 @@ pub struct App {
     pub best_lap_checkpoints: Vec<f32>,
     pub current_lap_checkpoints: Vec<f32>,
     pub checkpoint_delta: Option<(String, Instant)>,
-    pub lap_start_time: Option<Instant>,
+    pub lap_start_time: Option<f64>, // sim time
+    pub current_lap_time: f32,
     pub current_checkpoint: usize,
     pub last_pos: Vec2,
     pub have_last_pos: bool,
@@ -74,7 +75,7 @@ impl Drop for App {
 impl App {
     // Checks for checkpoint and start/finish line crossings.
     // This should be called every fixed_update.
-    pub fn check_lap_timing(&mut self, p0: Vec2, p1: Vec2, track: &Track) {
+    pub fn check_lap_timing(&mut self, p0: Vec2, p1: Vec2, track: &Track, sim_time: f64) {
         // 1. Check for starting a lap
         if self.lap_start_time.is_none() {
             if crate::util::line_segments_intersect(
@@ -84,7 +85,7 @@ impl App {
                 track.start_finish.1,
             ) {
                 // Crossed start line, begin timing
-                self.lap_start_time = Some(Instant::now());
+                self.lap_start_time = Some(sim_time);
                 self.current_checkpoint = 0;
                 self.current_lap_checkpoints.clear();
                 self.checkpoint_delta = None;
@@ -97,7 +98,7 @@ impl App {
         if next_checkpoint_idx < track.checkpoints.len() {
             let cp = track.checkpoints[next_checkpoint_idx];
             if crate::util::line_segments_intersect(p0, p1, cp.0, cp.1) {
-                let elapsed = self.lap_start_time.unwrap().elapsed().as_secs_f32();
+                let elapsed = (sim_time - self.lap_start_time.unwrap()) as f32;
                 self.current_lap_checkpoints.push(elapsed);
 
                 // Check for delta
@@ -120,8 +121,8 @@ impl App {
             ) {
                 let mut lap_delta_set = false;
                 // Lap complete!
-                if let Some(start) = self.lap_start_time {
-                    let duration = start.elapsed().as_secs_f32();
+                if let Some(start_time) = self.lap_start_time {
+                    let duration = (sim_time - start_time) as f32;
                     self.previous_lap_time = Some(duration);
                     self.lap_times.push(duration);
                     let old_best = self.best_lap_time;
@@ -142,7 +143,7 @@ impl App {
                 }
 
                 // Start new lap
-                self.lap_start_time = Some(Instant::now());
+                self.lap_start_time = Some(sim_time);
                 self.current_checkpoint = 0;
                 self.current_lap_checkpoints.clear();
                 if !lap_delta_set {

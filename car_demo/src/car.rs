@@ -236,6 +236,7 @@ impl App {
             current_lap_checkpoints: Vec::new(),
             checkpoint_delta: None,
             lap_start_time: None,
+            current_lap_time: 0.0,
             current_checkpoint: 0,
             last_pos: Vec2::ZERO, // Will be set by set_initial_car_pos indirectly
             have_last_pos: false,
@@ -282,6 +283,7 @@ impl App {
         self.skid_segments.clear();
         self.have_last_wheel_world = false;
         self.lap_start_time = None;
+        self.current_lap_time = 0.0;
         self.current_checkpoint = 0;
         self.current_lap_checkpoints.clear();
         self.checkpoint_delta = None;
@@ -334,7 +336,7 @@ impl App {
             ws[3].slip_ratio,
         ];
         self.plots
-            .push(rpm, speed_kmh, omega, slip, cs.yaw_rate_radps);
+            .push(cs.time_s, rpm, speed_kmh, omega, slip, cs.yaw_rate_radps);
 
         let glue = cs.speed_mps < 0.25;
 
@@ -344,7 +346,7 @@ impl App {
         if self.selected_track > 0 {
             let track = self.tracks[self.selected_track - 1].clone(); // Clone to avoid borrow issue TODO: make this not shit idk how to avoid the borrow checker. worst enemy
             if self.have_last_pos {
-                self.check_lap_timing(self.last_pos, pos, &track);
+                self.check_lap_timing(self.last_pos, pos, &track, cs.time_s);
             }
         }
         self.last_pos = pos;
@@ -451,6 +453,7 @@ impl App {
                         p1: wheel_world[i],
                         strength,
                         ttl: self.skid_ttl,
+                        width: self.desc.wheels[i].width_m,
                     });
                 }
                 self.last_wheel_world[i] = wheel_world[i];
@@ -461,6 +464,11 @@ impl App {
             seg.ttl -= dt;
         }
         self.skid_segments.retain(|s| s.ttl > 0.0);
+
+        // Update current lap time for HUD
+        self.current_lap_time = self
+            .lap_start_time
+            .map_or(0.0, |start| (cs.time_s - start) as f32);
     }
 
     pub unsafe fn step_sim(&mut self, ctx: &eframe::egui::Context) {
