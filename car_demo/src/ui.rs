@@ -943,7 +943,7 @@ impl App {
             let gear = ts.gear_index;
             let is_auto = self.desc.transmission.type_ != LCC_TRANS_MANUAL;
             let gtxt = if is_auto {
-                match ts.auto_mode as u32 {
+                match ts.auto_mode {
                     LCC_AUTO_PARK => "P".to_string(),
                     LCC_AUTO_REVERSE => "R".to_string(),
                     LCC_AUTO_NEUTRAL => "N".to_string(),
