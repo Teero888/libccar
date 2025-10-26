@@ -751,18 +751,55 @@ static float lcc__curve1d_eval(const lcc_curve1d_t *c, float x) {
 
 static float lcc__map2d_eval(const lcc_map2d_t *m, float x, float y) {
   if(!m || !m->points || m->count <= 0) return 0.0f;
-  float bestd2 = 1e30f;
-  float bestv  = m->points[0].v;
-  for(int i = 0; i < m->count; ++i) {
-    float dx = m->points[i].x - x;
-    float dy = m->points[i].y - y;
-    float d2 = dx * dx + dy * dy;
-    if(d2 < bestd2) {
-      bestd2 = d2;
-      bestv  = m->points[i].v;
+  if(m->count == 1) return m->points[0].v;
+
+  /* infer grid dimensions, assuming points are sorted by x, then y. */
+  int y_nodes = 1;
+  while(y_nodes < m->count && m->points[y_nodes].x == m->points[0].x) { y_nodes++; }
+
+  /* if not a grid, fallback to nearest neighbor. */
+  if(y_nodes <= 1 || m->count % y_nodes != 0) {
+    float bestd2 = 1e30f, bestv = m->points[0].v;
+    for(int i = 0; i < m->count; ++i) {
+      float dx = m->points[i].x - x, dy = m->points[i].y - y;
+      float d2 = dx * dx + dy * dy;
+      if(d2 < bestd2) {
+        bestd2 = d2;
+        bestv  = m->points[i].v;
+      }
     }
+    return bestv;
   }
-  return bestv;
+
+  int x_nodes = m->count / y_nodes;
+
+  /* find x-axis segment */
+  int ix0 = 0;
+  while(ix0 < x_nodes - 1 && x >= m->points[(ix0 + 1) * y_nodes].x) { ix0++; }
+  int ix1 = ix0 + 1;
+  if(ix1 >= x_nodes) ix1 = x_nodes - 1;
+
+  /* find y-axis segment */
+  int iy0 = 0;
+  while(iy0 < y_nodes - 1 && y >= m->points[iy0 + 1].y) { iy0++; }
+  int iy1 = iy0 + 1;
+  if(iy1 >= y_nodes) iy1 = y_nodes - 1;
+
+  /* get the four corner points of the cell */
+  const lcc_map2d_point_t *p00 = &m->points[ix0 * y_nodes + iy0];
+  const lcc_map2d_point_t *p10 = &m->points[ix1 * y_nodes + iy0];
+  const lcc_map2d_point_t *p01 = &m->points[ix0 * y_nodes + iy1];
+  const lcc_map2d_point_t *p11 = &m->points[ix1 * y_nodes + iy1];
+
+  /* interpolation factors (saturated) */
+  float tx = lcc__saturate((x - p00->x) * lcc__safe_inv(p10->x - p00->x, 1e-9f));
+  float ty = lcc__saturate((y - p00->y) * lcc__safe_inv(p01->y - p00->y, 1e-9f));
+
+  /* bilinear interpolation */
+  float v0 = lcc__lerp(p00->v, p10->v, tx);
+  float v1 = lcc__lerp(p01->v, p11->v, tx);
+
+  return lcc__lerp(v0, v1, ty);
 }
 
 static float lcc__rpm_to_radps(float rpm) {
