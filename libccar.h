@@ -755,7 +755,7 @@ static float lcc__map2d_eval(const lcc_map2d_t *m, float x, float y) {
 
   /* infer grid dimensions, assuming points are sorted by x, then y. */
   int y_nodes = 1;
-  while(y_nodes < m->count && m->points[y_nodes].x == m->points[0].x) { y_nodes++; }
+  while(y_nodes < m->count && m->points[y_nodes].x == m->points[0].x) y_nodes++;
 
   /* if not a grid, fallback to nearest neighbor. */
   if(y_nodes <= 1 || m->count % y_nodes != 0) {
@@ -775,13 +775,13 @@ static float lcc__map2d_eval(const lcc_map2d_t *m, float x, float y) {
 
   /* find x-axis segment */
   int ix0 = 0;
-  while(ix0 < x_nodes - 1 && x >= m->points[(ix0 + 1) * y_nodes].x) { ix0++; }
+  while(ix0 < x_nodes - 1 && x >= m->points[(ix0 + 1) * y_nodes].x) ix0++;
   int ix1 = ix0 + 1;
   if(ix1 >= x_nodes) ix1 = x_nodes - 1;
 
   /* find y-axis segment */
   int iy0 = 0;
-  while(iy0 < y_nodes - 1 && y >= m->points[iy0 + 1].y) { iy0++; }
+  while(iy0 < y_nodes - 1 && y >= m->points[iy0 + 1].y) iy0++;
   int iy1 = iy0 + 1;
   if(iy1 >= y_nodes) iy1 = y_nodes - 1;
 
@@ -1347,15 +1347,22 @@ typedef struct lcc_axle_torques_s {
 
 static lcc_axle_torques_t lcc__diff_open(float T_in, float Tlim_L, float Tlim_R) {
   lcc_axle_torques_t r;
-  float              s    = lcc__signf(T_in);
-  float              Tin  = lcc__absf(T_in);
-  float              TLc  = fmaxf(0.0f, Tlim_L);
-  float              TRc  = fmaxf(0.0f, Tlim_R);
-  float              half = 0.5f * Tin;
-  float              TL   = fminf(half, TLc);
-  float              TR   = fminf(half, TRc);
-  r.left_nm               = s * TL;
-  r.right_nm              = s * TR;
+  float              s       = lcc__signf(T_in);
+  float              Tin_abs = lcc__absf(T_in);
+
+  /* an open diff is limited by the wheel with the least grip. the max torque
+   * that can be applied to EITHER wheel is this value. */
+  float T_per_wheel_limit = fminf(Tlim_L, Tlim_R);
+
+  /* the total torque the axle can deliver to the ground is twice this value. */
+  float T_axle_limit = 2.0f * T_per_wheel_limit;
+
+  /* the actual torque delivered is the minimum of the input and the axle's grip limit. */
+  float T_axle_out = fminf(Tin_abs, T_axle_limit);
+
+  /* this torque is split 50/50 between the two wheels. */
+  r.left_nm  = s * T_axle_out * 0.5f;
+  r.right_nm = s * T_axle_out * 0.5f;
   return r;
 }
 
