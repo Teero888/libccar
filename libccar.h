@@ -1152,10 +1152,13 @@ static void lcc__apply_steering(lcc_car_t *car) {
       /* steer right: FR inner, FL outer */
       car->wheel_steer_rad[fiR] = lcc__lerp(delta, d_in, af);
       car->wheel_steer_rad[fiL] = lcc__lerp(delta, d_out, af);
-    } else {
+    } else if (delta < 0.0f) {
       /* steer left: FL inner, FR outer */
       car->wheel_steer_rad[fiL] = -lcc__lerp(-delta, d_in, af);
       car->wheel_steer_rad[fiR] = -lcc__lerp(-delta, d_out, af);
+    } else {
+      car->wheel_steer_rad[fiL] = 0.0f;
+      car->wheel_steer_rad[fiR] = 0.0f;
     }
   } else {
     /* uniform steer for all steerable wheels (or non-front configurations) */
