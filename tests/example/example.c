@@ -3,7 +3,6 @@
 #include <math.h>
 #include <stdio.h>
 
-#define LCC_IMPLEMENTATION
 #include "libccar.h"
 
 static const char *evt_name(lcc_event_type_t t) {

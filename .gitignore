@@ -11,3 +11,5 @@ perf.*
 *.keystore
 *.base64
 .cache
+tests/build
+libccar.so

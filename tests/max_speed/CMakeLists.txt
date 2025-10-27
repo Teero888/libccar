@@ -6,4 +6,4 @@ add_executable(max_speed main.c)
 
 target_include_directories(max_speed PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../../)
 
-target_link_libraries(max_speed m)
+target_link_libraries(max_speed m libccar_impl)

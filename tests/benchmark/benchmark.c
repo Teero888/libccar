@@ -1,6 +1,5 @@
 #include <stdio.h>
 #include <time.h>
-#define LIBCCAR_IMPLEMENTATION
 #include "libccar.h"
 
 clock_t timer_start() {
