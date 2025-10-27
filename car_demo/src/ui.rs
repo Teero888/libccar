@@ -599,7 +599,7 @@ impl App {
         }
 
         ui.separator();
-        ui.collapsing("Lap Times (Side Panel)", |ui| {
+        ui.collapsing("Lap Times", |ui| {
             if self.selected_track == 0 {
                 ui.label("Select a track to start timing.");
             } else {

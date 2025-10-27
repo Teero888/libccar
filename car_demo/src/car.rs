@@ -41,6 +41,8 @@ impl App {
         let mut d: ffi::lcc_car_desc_t = mem::zeroed();
         ffi::lcc_car_desc_init_defaults(&mut d);
 
+        // Re-add `make_curve` and define curves in Rust for diagnostic purposes.
+        // This tests if the issue is with the curve data values vs. the FFI pointer handling.
         fn make_curve<const N: usize>(pts: [(f32, f32); N]) -> ffi::lcc_curve1d_t {
             let mut v = Vec::<ffi::lcc_curve1d_point_t>::with_capacity(N);
             for (x, y) in pts {
@@ -53,48 +55,38 @@ impl App {
             }
         }
 
-        const WEAK_WOT: [(f32, f32); 11] = [
-            (800.0, 120.0),
-            (1200.0, 150.0),
-            (1800.0, 175.0),
-            (2400.0, 195.0),
-            (3000.0, 210.0),
-            (3600.0, 220.0),
-            (4200.0, 225.0),
-            (4800.0, 225.0),
-            (5400.0, 215.0),
-            (6000.0, 200.0),
-            (6800.0, 180.0),
+        const DEFAULT_WOT: [(f32, f32); 6] = [
+            (800.0, 90.0),
+            (1500.0, 140.0),
+            (2500.0, 180.0),
+            (4000.0, 200.0),
+            (5500.0, 180.0),
+            (6500.0, 150.0),
         ];
-        const WEAK_FRIC: [(f32, f32); 8] = [
-            (0.0, 8.0),
-            (1000.0, 10.0),
-            (2000.0, 14.0),
-            (3000.0, 18.0),
-            (4000.0, 24.0),
-            (5000.0, 32.0),
-            (6000.0, 42.0),
-            (7000.0, 54.0),
-        ];
-        const DRIFT_WOT: [(f32, f32); 7] = [
+        const HYPERCAR_WOT: [(f32, f32); 6] = [
             (1000.0, 400.0),
-            (2000.0, 550.0),
-            (3000.0, 650.0),
-            (4000.0, 660.0),
-            (5000.0, 640.0),
-            (6000.0, 580.0),
-            (7000.0, 500.0),
+            (2500.0, 650.0),
+            (4000.0, 800.0),
+            (6000.0, 750.0),
+            (7500.0, 700.0),
+            (8500.0, 600.0),
         ];
-        const DRIFT_FRIC: [(f32, f32); 8] = [
+
+        const DEFAULT_FRIC: [(f32, f32); 6] = [
             (0.0, 15.0),
             (1000.0, 20.0),
             (2000.0, 25.0),
-            (3000.0, 32.0),
-            (4000.0, 40.0),
-            (5000.0, 50.0),
-            (6000.0, 65.0),
-            (7000.0, 80.0),
+            (4000.0, 35.0),
+            (6000.0, 50.0),
+            (8000.0, 70.0),
         ];
+
+        if preset == ViewPreset::Hypercar {
+            d.engine.wot_torque_nm_vs_rpm = make_curve(HYPERCAR_WOT);
+        } else {
+            d.engine.wot_torque_nm_vs_rpm = make_curve(DEFAULT_WOT);
+        }
+        d.engine.friction_torque_nm_vs_rpm = make_curve(DEFAULT_FRIC);
 
         match preset {
             ViewPreset::Economy => {
@@ -165,14 +157,6 @@ impl App {
                 d.transmission.type_ = LCC_TRANS_MANUAL;
                 d.transmission.final_drive_ratio = 3.7;
             }
-        }
-
-        if preset == ViewPreset::Drift {
-            d.engine.wot_torque_nm_vs_rpm = make_curve(DRIFT_WOT);
-            d.engine.friction_torque_nm_vs_rpm = make_curve(DRIFT_FRIC);
-        } else {
-            d.engine.wot_torque_nm_vs_rpm = make_curve(WEAK_WOT);
-            d.engine.friction_torque_nm_vs_rpm = make_curve(WEAK_FRIC);
         }
 
         d

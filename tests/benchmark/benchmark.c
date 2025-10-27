@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <time.h>
 #define LIBCCAR_IMPLEMENTATION
-#include "../libccar.h"
+#include "libccar.h"
 
 clock_t timer_start() {
   return clock();
@@ -58,7 +58,6 @@ int main(void) {
   lcc_car_desc_init_defaults(&desc);
 
   desc.transmission.type = LCC_TRANS_MANUAL; 
-  desc.ecu.auto_clutch   = 1;  
   desc.ecu.abs_mode      = LCC_ABS_ON;
   desc.ecu.tc_mode       = LCC_TC_ON;
   desc.ecu.esc_mode      = LCC_ESC_ON;
@@ -127,15 +126,16 @@ int main(void) {
   }
 
   ctl.throttle  = 1.0f;
-  lcc_car_shift_up(car);
+  ctl.gear_request = 1;
   clock_t clock = timer_start();
 
-  for(int i = 0; i < 1e6; ++i) {
+  for(int i = 0; i < 1000000; ++i) {
     lcc_car_set_controls(car, &ctl);
     lcc_car_step(car, 1.0f / 240.0f);
+    ctl.gear_request = 0; // Reset gear request after one step
   }
   double time = timer_end(clock);
-  printf("Took %f for 1e6 ticks. %f TPS\n", time, 1e6 / time);
+  printf("Took %f for 1e6 ticks. %f TPS\n", time, 1000000.0 / time);
   printf("Speed: %.1f km/h, RPM: %.0f\n", lcc_car_get_speed_kmh(car), car->engine_state.rpm);
 
   lcc_car_destroy(car);

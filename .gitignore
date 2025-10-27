@@ -10,3 +10,4 @@ perf.*
 *.diff
 *.keystore
 *.base64
+.cache

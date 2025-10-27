@@ -1199,7 +1199,7 @@ static void lcc__pacejka_coeffs_from_muK(float mu, float Fz, float K, float C_de
   float C     = fmaxf(0.8f, C_def);
   float E     = lcc__clampf(E_def, 0.0f, 1.2f);
   float denom = fmaxf(1e-3f, C * D);
-  float B     = lcc__clampf(K / denom, 0.01f, 50.0f);
+  float B     = lcc__clampf(K / denom, 0.01f, 200.0f);
   if(B_out) *B_out = B;
   if(C_out) *C_out = C;
   if(D_out) *D_out = D;
@@ -1569,7 +1569,8 @@ static void lcc__thermal_update(lcc_car_t *car, float engine_power_kw, float dt)
     float vtire[2];
     lcc__wheel_vel_tire_frame(car, i, vtire);
     float slip_speed = lcc__absf(vtire[0] - car->wheel_states[i].omega_radps * car->desc.wheels[i].radius_m) + lcc__absf(vtire[1]);
-    float P          = lcc__absf(car->wheel_states[i].tire_force_long_n * (vtire[1])) + lcc__absf(car->wheel_states[i].tire_force_lat_n * vtire[0]);
+    float slip_vx = car->wheel_states[i].omega_radps * car->desc.wheels[i].radius_m - vtire[0];
+    float P       = lcc__absf(car->wheel_states[i].tire_force_long_n * slip_vx) + lcc__absf(car->wheel_states[i].tire_force_lat_n * vtire[1]);
     float mcp        = 15000.0f; /* j/k per tire crude */
     float hA         = 6.0f;     /* w/k convective */
     float T          = car->wheel_states[i].tire_temp_c;
@@ -2291,13 +2292,13 @@ void lcc_engine_desc_init_defaults(lcc_engine_desc_t *desc) {
   lcc__pzero(desc);
   desc->fuel                          = LCC_FUEL_GASOLINE;
   desc->forced_induction              = LCC_FI_NONE;
-  desc->idle_rpm                      = 800.0f;
+  desc->idle_rpm                      = 850.0f;
   desc->redline_rpm                   = 6500.0f;
   desc->stall_rpm                     = 400.0f;
-  desc->inertia_kgm2                  = 0.2f;
+  desc->inertia_kgm2                  = 0.22f;
   desc->wastegate_pressure_kpa        = 110.0f;
-  desc->coolant_heat_capacity_j_per_k = 60000.0f;
-  desc->oil_heat_capacity_j_per_k     = 40000.0f;
+  desc->coolant_heat_capacity_j_per_k = 40000.0f;
+  desc->oil_heat_capacity_j_per_k     = 20000.0f;
 
   /* sane default maps */
   desc->wot_torque_nm_vs_rpm.points      = LCC__DEF_ENGINE_WOT_POINTS;
@@ -2346,7 +2347,7 @@ void lcc_alternator_desc_init_defaults(lcc_alternator_desc_t *desc) {
 void lcc_starter_desc_init_defaults(lcc_starter_desc_t *desc) {
   if(!desc) return;
   lcc__pzero(desc);
-  desc->power_w = 1000.0f;
+  desc->power_w = 1500.0f;
 }
 
 void lcc_ecu_desc_init_defaults(lcc_ecu_desc_t *desc) {
@@ -2355,8 +2356,8 @@ void lcc_ecu_desc_init_defaults(lcc_ecu_desc_t *desc) {
 
   /* TODO: one of these is fucked up */
   desc->abs_mode = LCC_ABS_ON;
-  desc->tc_mode  = LCC_TC_ON;
-  desc->esc_mode = LCC_ESC_ON;
+  desc->tc_mode  = LCC_TC_OFF;
+  desc->esc_mode = LCC_ESC_OFF;
 
   desc->idle_control = 1;
   desc->idle_pid_p   = 0.5f;
@@ -2370,18 +2371,18 @@ void lcc_transmission_desc_init_defaults(lcc_transmission_desc_t *desc) {
   /* gear_ratios: [0]=reverse, [1]=neutral */
   desc->gear_count = 8;
   float gr[8]      = {
-    -3.2f,
-    0.0f,
-    3.1f,
-    2.1f,
-    1.5f,
-    1.2f,
-    1.0f,
-    0.84f,
+      -2.9f, /* R */
+      0.0f,  /* N */
+      3.6f,  /* 1 */
+      2.2f,  /* 2 */
+      1.5f,  /* 3 */
+      1.2f,  /* 4 */
+      1.0f,  /* 5 */
+      0.8f,  /* 6 */
   };
   for(int i = 0; i < desc->gear_count; ++i) desc->gear_ratios[i] = gr[i];
-  desc->final_drive_ratio  = 3.9f;
-  desc->shift_time_s       = 0.10f;
+  desc->final_drive_ratio  = 3.44f;
+  desc->shift_time_s       = 0.12f;
   desc->auto_upshift_rpm   = 5800.0f;
   desc->auto_downshift_rpm = 2000.0f;
 }
@@ -2428,7 +2429,7 @@ void lcc_wheel_desc_init_defaults(lcc_wheel_desc_t *desc) {
   lcc__pzero(desc);
   desc->radius_m     = 0.31f;
   desc->width_m      = 0.22f;
-  desc->inertia_kgm2 = 1.2f;
+  desc->inertia_kgm2 = 1.0f;
   desc->steerable    = 0;
   desc->driven       = 1;
   desc->has_brake    = 1;
@@ -2438,7 +2439,7 @@ void lcc_tire_desc_init_defaults(lcc_tire_desc_t *desc) {
   if(!desc) return;
   lcc__pzero(desc);
   desc->mu_nominal               = 1.0f;
-  desc->load_sensitivity         = -0.0002f;
+  desc->load_sensitivity         = -0.00015f;
   desc->rolling_resistance       = 0.015f;
   desc->pressure_kpa             = 220.0f;
   desc->ideal_pressure_kpa       = 240.0f;

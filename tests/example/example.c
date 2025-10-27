@@ -4,7 +4,7 @@
 #include <stdio.h>
 
 #define LCC_IMPLEMENTATION
-#include "../libccar.h"
+#include "libccar.h"
 
 static const char *evt_name(lcc_event_type_t t) {
   switch(t) {
@@ -54,7 +54,6 @@ int main(void) {
 
   /* tweak some descriptor bits (optional) */
   desc.transmission.type = LCC_TRANS_MANUAL; /* keep manual; we will shift ourselves */
-  desc.ecu.auto_clutch   = 1;                /* auto clutch during shifts for simplicity */
   desc.ecu.abs_mode      = LCC_ABS_ON;
   desc.ecu.tc_mode       = LCC_TC_ON;
   desc.ecu.esc_mode      = LCC_ESC_ON;
@@ -126,7 +125,7 @@ int main(void) {
   }
 
   /* select 1st gear (0=R, 1=N, 2=1st) */
-  lcc_car_request_gear(car, 2);
+  ctl.gear_request = 1;
 
   /* drive scenario:
      - 0..10 s: accelerate with throttle ramp, shift up near redline
@@ -156,7 +155,7 @@ int main(void) {
         ctl.steer    = 0.0f;
 
         /* shift up near 6400 rpm if not already shifting */
-        if(!car->trans_state.shifting && rpm > 6400.0f) lcc_car_shift_up(car);
+        if(!car->trans_state.shifting && rpm > 6400.0f) ctl.gear_request = 1;
       } else if(t < 12.0) {
         /* cruise a bit */
         ctl.throttle = 0.25f;
@@ -175,6 +174,7 @@ int main(void) {
 
       lcc_car_set_controls(car, &ctl);
       lcc_car_step(car, dt);
+      ctl.gear_request = 0;
 
       if((double)car->car_state.time_s >= next_print) {
         print_status(car, &ctl);
