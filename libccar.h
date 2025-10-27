@@ -2439,7 +2439,7 @@ void lcc_tire_desc_init_defaults(lcc_tire_desc_t *desc) {
   if(!desc) return;
   lcc__pzero(desc);
   desc->mu_nominal               = 1.0f;
-  desc->load_sensitivity         = -0.00015f;
+  desc->load_sensitivity         = -0.00005f;
   desc->rolling_resistance       = 0.015f;
   desc->pressure_kpa             = 220.0f;
   desc->ideal_pressure_kpa       = 240.0f;

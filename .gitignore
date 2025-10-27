@@ -13,3 +13,4 @@ perf.*
 .cache
 tests/build
 libccar.so
+compile_commands.json

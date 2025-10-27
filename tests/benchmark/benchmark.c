@@ -131,7 +131,7 @@ int main(void) {
   for(int i = 0; i < 1000000; ++i) {
     lcc_car_set_controls(car, &ctl);
     lcc_car_step(car, 1.0f / 240.0f);
-    ctl.gear_request = 0; // Reset gear request after one step
+    ctl.gear_request = 0; /* reset gear request after one step */
   }
   double time = timer_end(clock);
   printf("Took %f for 1e6 ticks. %f TPS\n", time, 1000000.0 / time);
